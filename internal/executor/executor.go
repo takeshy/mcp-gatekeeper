@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -19,9 +20,10 @@ const (
 
 // ExecutorConfig holds executor configuration
 type ExecutorConfig struct {
-	Timeout   time.Duration
-	MaxOutput int
-	RootDir   string // If set, restricts execution to this directory (jail/sandbox)
+	Timeout     time.Duration
+	MaxOutput   int
+	RootDir     string      // If set, restricts execution to this directory (jail/sandbox)
+	SandboxMode SandboxMode // Sandbox mode: none, bwrap, auto
 }
 
 // DefaultConfig returns the default executor configuration
@@ -43,7 +45,8 @@ type ExecuteResult struct {
 
 // Executor executes commands with timeout and output limits
 type Executor struct {
-	config *ExecutorConfig
+	config  *ExecutorConfig
+	sandbox *Sandbox
 }
 
 // NewExecutor creates a new Executor
@@ -51,7 +54,30 @@ func NewExecutor(config *ExecutorConfig) *Executor {
 	if config == nil {
 		config = DefaultConfig()
 	}
-	return &Executor{config: config}
+
+	e := &Executor{config: config}
+
+	// Initialize sandbox if root directory is set
+	if config.RootDir != "" {
+		sandboxConfig := &SandboxConfig{
+			Mode:    config.SandboxMode,
+			RootDir: config.RootDir,
+		}
+		// Default to auto mode if not specified
+		if sandboxConfig.Mode == "" {
+			sandboxConfig.Mode = SandboxAuto
+		}
+
+		sandbox, err := NewSandbox(sandboxConfig)
+		if err != nil {
+			// Log error but continue with basic path validation
+			fmt.Fprintf(os.Stderr, "WARNING: Failed to initialize sandbox: %v\n", err)
+		} else {
+			e.sandbox = sandbox
+		}
+	}
+
+	return e
 }
 
 // Execute executes a command with the given parameters
@@ -59,11 +85,26 @@ func (e *Executor) Execute(ctx context.Context, cwd, cmd string, args []string, 
 	result := &ExecuteResult{}
 	startTime := time.Now()
 
-	// Validate paths if RootDir is set (jail mode)
-	if e.config.RootDir != "" {
+	var actualCmd string
+	var actualArgs []string
+
+	// Use sandbox if available
+	if e.sandbox != nil {
+		var err error
+		actualCmd, actualArgs, err = e.sandbox.WrapCommand(cwd, cmd, args)
+		if err != nil {
+			return nil, fmt.Errorf("sandbox validation failed: %w", err)
+		}
+	} else if e.config.RootDir != "" {
+		// Fallback to basic path validation if sandbox not initialized
 		if err := e.validatePath(cwd); err != nil {
 			return nil, fmt.Errorf("cwd validation failed: %w", err)
 		}
+		actualCmd = cmd
+		actualArgs = args
+	} else {
+		actualCmd = cmd
+		actualArgs = args
 	}
 
 	// Create context with timeout
@@ -71,8 +112,11 @@ func (e *Executor) Execute(ctx context.Context, cwd, cmd string, args []string, 
 	defer cancel()
 
 	// Create command
-	execCmd := exec.CommandContext(execCtx, cmd, args...)
-	execCmd.Dir = cwd
+	execCmd := exec.CommandContext(execCtx, actualCmd, actualArgs...)
+	// Only set Dir if not using bwrap (bwrap sets it via --chdir)
+	if e.sandbox == nil || e.sandbox.Mode() != SandboxBwrap {
+		execCmd.Dir = cwd
+	}
 	if len(env) > 0 {
 		execCmd.Env = env
 	}
@@ -239,4 +283,17 @@ func IsPathWithinRoot(root, path string) bool {
 // GetRootDir returns the configured root directory
 func (e *Executor) GetRootDir() string {
 	return e.config.RootDir
+}
+
+// GetSandboxMode returns the effective sandbox mode
+func (e *Executor) GetSandboxMode() SandboxMode {
+	if e.sandbox != nil {
+		return e.sandbox.Mode()
+	}
+	return SandboxNone
+}
+
+// IsSandboxed returns true if commands are sandboxed with bwrap
+func (e *Executor) IsSandboxed() bool {
+	return e.sandbox != nil && e.sandbox.Mode() == SandboxBwrap
 }

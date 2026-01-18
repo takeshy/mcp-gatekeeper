@@ -36,7 +36,7 @@ type StdioServer struct {
 }
 
 // NewStdioServer creates a new stdio MCP server
-func NewStdioServer(database *db.DB, apiKeyStr string, rootDir string) (*StdioServer, error) {
+func NewStdioServer(database *db.DB, apiKeyStr string, rootDir string, sandboxMode executor.SandboxMode) (*StdioServer, error) {
 	authenticator := auth.NewAuthenticator(database)
 
 	// Authenticate API key
@@ -58,9 +58,10 @@ func NewStdioServer(database *db.DB, apiKeyStr string, rootDir string) (*StdioSe
 	}
 
 	execConfig := &executor.ExecutorConfig{
-		Timeout:   executor.DefaultTimeout,
-		MaxOutput: executor.DefaultMaxOutput,
-		RootDir:   rootDir,
+		Timeout:     executor.DefaultTimeout,
+		MaxOutput:   executor.DefaultMaxOutput,
+		RootDir:     rootDir,
+		SandboxMode: sandboxMode,
 	}
 
 	return &StdioServer{

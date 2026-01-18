@@ -78,6 +78,7 @@ type HTTPConfig struct {
 	RateLimit       int
 	RateLimitWindow time.Duration
 	RootDir         string
+	SandboxMode     executor.SandboxMode
 }
 
 // DefaultHTTPConfig returns the default HTTP configuration
@@ -95,9 +96,10 @@ func NewHTTPServer(database *db.DB, config *HTTPConfig) *HTTPServer {
 	}
 
 	execConfig := &executor.ExecutorConfig{
-		Timeout:   executor.DefaultTimeout,
-		MaxOutput: executor.DefaultMaxOutput,
-		RootDir:   config.RootDir,
+		Timeout:     executor.DefaultTimeout,
+		MaxOutput:   executor.DefaultMaxOutput,
+		RootDir:     config.RootDir,
+		SandboxMode: config.SandboxMode,
 	}
 
 	s := &HTTPServer{

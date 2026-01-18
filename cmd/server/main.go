@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/takeshy/mcp-gatekeeper/internal/db"
+	"github.com/takeshy/mcp-gatekeeper/internal/executor"
 	"github.com/takeshy/mcp-gatekeeper/internal/mcp"
 )
 
@@ -23,6 +24,7 @@ func main() {
 		apiKey    = flag.String("api-key", "", "API key for stdio mode (or MCP_GATEKEEPER_API_KEY env var)")
 		rateLimit = flag.Int("rate-limit", 500, "Rate limit per API key per minute (for http mode)")
 		rootDir   = flag.String("root-dir", "", "Root directory for command execution (required, acts as chroot)")
+		sandbox   = flag.String("sandbox", "auto", "Sandbox mode: auto, bwrap, or none")
 	)
 	flag.Parse()
 
@@ -50,6 +52,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Validate sandbox mode
+	sandboxMode := executor.SandboxMode(*sandbox)
+	switch sandboxMode {
+	case executor.SandboxAuto, executor.SandboxBwrap, executor.SandboxNone:
+		// Valid
+	default:
+		fmt.Fprintf(os.Stderr, "Error: invalid sandbox mode: %s (must be auto, bwrap, or none)\n", *sandbox)
+		os.Exit(1)
+	}
+
 	// Get API key from env if not provided
 	if *apiKey == "" {
 		*apiKey = os.Getenv("MCP_GATEKEEPER_API_KEY")
@@ -66,12 +78,12 @@ func main() {
 	// Run in appropriate mode
 	switch *mode {
 	case "stdio":
-		if err := runStdio(database, *apiKey, rootDirAbs); err != nil {
+		if err := runStdio(database, *apiKey, rootDirAbs, sandboxMode); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 	case "http":
-		if err := runHTTP(database, *addr, *rateLimit, rootDirAbs); err != nil {
+		if err := runHTTP(database, *addr, *rateLimit, rootDirAbs, sandboxMode); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -81,12 +93,12 @@ func main() {
 	}
 }
 
-func runStdio(database *db.DB, apiKey string, rootDir string) error {
+func runStdio(database *db.DB, apiKey string, rootDir string, sandboxMode executor.SandboxMode) error {
 	if apiKey == "" {
 		return fmt.Errorf("API key required for stdio mode (use --api-key or MCP_GATEKEEPER_API_KEY env var)")
 	}
 
-	server, err := mcp.NewStdioServer(database, apiKey, rootDir)
+	server, err := mcp.NewStdioServer(database, apiKey, rootDir, sandboxMode)
 	if err != nil {
 		return fmt.Errorf("failed to create stdio server: %w", err)
 	}
@@ -105,11 +117,12 @@ func runStdio(database *db.DB, apiKey string, rootDir string) error {
 	return server.Run(ctx)
 }
 
-func runHTTP(database *db.DB, addr string, rateLimit int, rootDir string) error {
+func runHTTP(database *db.DB, addr string, rateLimit int, rootDir string, sandboxMode executor.SandboxMode) error {
 	config := &mcp.HTTPConfig{
 		RateLimit:       rateLimit,
 		RateLimitWindow: time.Minute,
 		RootDir:         rootDir,
+		SandboxMode:     sandboxMode,
 	}
 	server := mcp.NewHTTPServer(database, config)
 
