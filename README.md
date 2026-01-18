@@ -1,16 +1,21 @@
 # MCP Gatekeeper
 
-A secure MCP (Model Context Protocol) server that controls command execution based on API key policies. Features API key-based authentication, glob-based policy rules, comprehensive audit logging, and a TUI administration tool.
+An MCP (Model Context Protocol) server that **executes shell commands and returns their results**. It enables AI assistants like Claude to run commands on your system and receive stdout, stderr, and exit codes.
+
+While providing full shell access, MCP Gatekeeper includes flexible security controls to keep your system safe:
+
+- **API key-based access control** - Each client gets its own API key with customizable permissions
+- **Glob-based policy rules** - Fine-grained control over which commands and directories are allowed
+- **Audit logging** - Complete history of all command executions for review
 
 ## Features
 
-- **API Key Authentication**: Secure API key management with bcrypt hashing
-- **Policy-based Access Control**: Flexible glob patterns for allowing/denying commands and working directories
-- **Dual Protocol Support**: Both stdio (JSON-RPC) and HTTP API modes
-- **Audit Logging**: Complete logging of all command requests and execution results
+- **Shell Command Execution**: Run any shell command and receive stdout, stderr, and exit code
+- **Flexible Security**: Configure allowed/denied commands and directories per API key using glob patterns
+- **Dual Protocol Support**: Both stdio (JSON-RPC for MCP) and HTTP API modes
 - **TUI Admin Tool**: Interactive terminal interface for managing keys, policies, and viewing logs
+- **Audit Logging**: Complete logging of all command requests and execution results
 - **Rate Limiting**: Built-in rate limiting for the HTTP API
-- **Command Normalization**: Automatic path resolution and command normalization
 
 ## Installation
 
