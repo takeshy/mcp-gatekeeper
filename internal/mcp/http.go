@@ -82,7 +82,7 @@ type HTTPConfig struct {
 // DefaultHTTPConfig returns the default HTTP configuration
 func DefaultHTTPConfig() *HTTPConfig {
 	return &HTTPConfig{
-		RateLimit:       100,
+		RateLimit:       500,
 		RateLimitWindow: time.Minute,
 	}
 }

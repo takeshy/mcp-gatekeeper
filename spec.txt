@@ -1,0 +1,264 @@
+# 仕様書：MCP Gatekeeper（APIキー別 実行制御）
+
+## 1. 目的
+
+MCPサーバ経由で実行される「コマンド実行」および「作業ディレクトリ（親ディレクトリ）制約」を **APIキー単位**で制御する。
+許可（allow）と禁止（deny）の両方を **globパターン**で設定でき、監査ログを残す。
+
+## 2. 対象範囲（スコープ）
+
+### 2.1 管理対象
+
+* APIキー（発行・無効化・ローテーション）
+* APIキーごとのポリシー
+
+  * 実行可能な親ディレクトリ一覧（glob可）
+  * 実行可能コマンド一覧（glob可）
+  * 実行不可コマンド一覧（glob可）
+  * 優先順位（deny優先など）
+* 実行リクエストの監査ログ
+
+### 2.2 非対象（Non-goals / MVPではやらない）
+
+* OSレベルの隔離（コンテナ・VM分離）は別プロジェクト（ただし将来拡張前提で設計）
+* 任意ファイルの読み書き権限管理（まずは“実行”と“cwd制約”に集中）
+
+---
+
+## 3. 用語
+
+* **APIキー**：クライアントがMCPサーバに提示する認証トークン
+* **ポリシー**：APIキーに紐づく許可/禁止ルール群
+* **親ディレクトリ**：実行時の `cwd` を許可するルート（例：`/srv/projects/*`）
+* **コマンド**：実行するプログラム＋引数列（例：`git status`）
+* **glob**：`*` `?` `**` を用いたパターン（後述）
+
+---
+
+## 4. 機能要件
+
+### 4.1 認証・認可
+
+* すべての実行リクエストは `X-API-Key`（またはAuthorizationヘッダ）で認証する
+* 認証成功後、APIキーに紐づくポリシーで認可判定を行う
+* APIキーは **ハッシュ化（例：bcrypt/argon2）**してDB保存し、平文は保存しない（発行時のみ表示）
+
+### 4.2 ポリシー（APIキー別）
+
+各APIキーに以下を設定可能にする。
+
+#### (A) 実行可能親ディレクトリ（glob可）
+
+* 例
+
+  * `/srv/repo/**`
+  * `/home/mcp/*/work`
+* 判定は **canonical path（実体パス）**で行う
+
+  * `..`、シンボリックリンク、相対パスを解決してから照合する（パストラバーサル対策）
+
+#### (B) 実行可能コマンド（glob可）
+
+* 例
+
+  * `git *`
+  * `python **/*.py`
+  * `/usr/bin/node *`
+* コマンド判定は **正規化した“コマンド文字列”**で行う（後述）
+
+#### (C) 実行不可コマンド（glob可）
+
+* 例
+
+  * `rm *`
+  * `* --dangerous-*`
+  * `curl *`
+* **denyがallowより優先**（デフォルト）。ポリシーで切替可能にする（4.2.1）
+
+#### (D) 優先順位（Policy precedence）
+
+* `precedence = "deny_overrides"`（デフォルト）
+* `precedence = "allow_overrides"`（例外運用用。基本は非推奨）
+
+#### (E) デフォルト動作
+
+* allowlistが空の場合：**原則すべて拒否**（安全側）
+* allowlistがある場合：allowにマッチするものだけ許可
+* denylistは常に評価（precedenceに従う）
+
+---
+
+### 4.3 glob仕様（MVPの定義）
+
+* サポート：`*`（0文字以上）、`?`（1文字）、`**`（ディレクトリ階層含む）
+* 大文字小文字：Linux想定で **区別する**（必要ならオプション化）
+* エスケープ：`\*` のようなエスケープはMVPでは不要（将来拡張）
+* 文字列の照合対象：
+
+  * パス：canonical path文字列
+  * コマンド：正規化後の `"<executable> <args...>"` 文字列
+
+---
+
+### 4.4 コマンド正規化ルール（重要）
+
+実行リクエストは構造化データ（推奨）で受ける。
+
+#### 入力（推奨）
+
+* `cmd`: string（実行ファイル）
+* `args`: string[]（引数）
+* `cwd`: string
+
+#### 正規化
+
+* `cmd` が相対ならPATH解決して **絶対パス化**（設定で禁止も可）
+* `args` は **シェル展開しない**（`sh -c` は危険なので原則禁止。許可する場合は明示的に）
+* 正規化文字列：`cmd_abs + " " + join(args, " ")`
+
+  * 例：`/usr/bin/git status -sb`
+
+照合はこの正規化文字列に対してglobマッチする。
+
+---
+
+### 4.5 実行API（MCPサーバの前段/内蔵どちらでも）
+
+#### エンドポイント例
+
+* `POST /v1/execute`
+
+  * request:
+
+    ```json
+    {
+      "cwd": "/srv/repo/foo",
+      "cmd": "git",
+      "args": ["status", "-sb"],
+      "timeout_sec": 30,
+      "env": {"FOO":"bar"} 
+    }
+    ```
+  * response（成功）:
+
+    ```json
+    { "exit_code": 0, "stdout": "...", "stderr": "", "duration_ms": 120 }
+    ```
+  * response（拒否）:
+
+    ```json
+    { "error": { "code": "POLICY_DENIED", "message": "command denied", "matched": ["deny: rm *"] } }
+    ```
+
+#### envの扱い
+
+* envは **allowlist方式**（ポリシーに `allowed_env_keys` を追加しても良い）
+
+---
+
+### 4.6 管理UI（最低限MVP）
+
+* APIキー一覧
+
+  * 名前、作成日、最終利用、状態（active/revoked）
+  * 新規発行（発行直後に平文キーを1回だけ表示）
+  * 失効（revoked）
+* APIキー詳細
+
+  * 親ディレクトリ allow globリスト（追加/削除）
+  * コマンド allow globリスト
+  * コマンド deny globリスト
+  * precedence切替
+  * テスト実行（この入力は許可？をその場で判定して表示）
+* 監査ログ閲覧
+
+  * 時刻、APIキー、cwd、cmd、判定（allow/deny）、マッチしたルール、exit_code、実行時間
+
+---
+
+## 5. データモデル SQLite3
+
+### 5.1 tables（案）
+
+* `api_keys`
+
+  * `id` 
+  * `name` 
+  * `key_hash`
+  * `status` (active|revoked)
+  * `created_at`, `revoked_at`
+  * `last_used_at`
+* `policies`
+
+  * `api_key_id` (fk)
+  * `precedence` (deny_overrides|allow_overrides)
+  * `allowed_cwd_globs
+  * `allowed_cmd_globs
+  * `denied_cmd_globs
+* `audit_logs`
+
+  * `id` 
+  * `api_key_id`
+  * `requested_cwd`, `requested_cmd`, `requested_args`
+  * `normalized_cwd`, `normalized_cmdline`
+  * `decision` (allow|deny)
+  * `matched_rules` 
+  * `stdout` ,`stderr`
+  * `exit_code`, `duration_ms`
+  * `created_at`
+
+---
+
+## 6. 認可判定アルゴリズム（擬似）
+
+1. APIキー認証
+2. `cwd` を canonicalize（実体パス）
+3. `cmd` を絶対パス化（または固定マッピング）し `cmdline` を正規化
+4. `cwd` が allowed_cwd_globs に **1つでも**マッチするか（allowlist空ならdeny）
+5. `cmdline` を deny_cmd_globs / allow_cmd_globs で照合
+6. precedenceに従い最終決定
+7. 監査ログ記録
+8. allowの場合のみ実行
+
+---
+
+## 7. セキュリティ要件（MVP必須）
+
+* `sh -c` / `bash -c` のようなシェル起動を **デフォルト禁止**（必要ならdeny/allowで明示）
+* シンボリックリンク経由の脱出対策：cwdは **realpath** を基準に判定
+* タイムアウト必須（デフォルト30秒、最大はサーバ設定）
+* 出力サイズ上限（stdout/stderr合計で例：5MB。超えたら打ち切り）
+* レート制限（APIキーごと：例 60 req/min）
+* 監査ログは改ざん耐性（少なくとも追記型、運用ならWORM/別ストレージも検討）
+
+---
+
+## 8. 運用要件
+
+* ポリシー変更は即時反映（キャッシュするならTTL短め＋手動invalid）
+* APIキーのローテーション手順
+
+  * 新キー発行 → クライアント切替 → 旧キー失効
+* バックアップ：DB daily snapshot
+
+---
+
+## 9. テスト要件（受け入れ条件）
+
+* globマッチの単体テスト（`*` `**` `?`）
+* cwdのrealpath化が効いている（`/srv/repo/../etc` を拒否できる）
+* denyがallowより優先（precedence設定で反転もできる）
+* `cmd` がPATH解決され、想定通りの正規化で判定される
+* 監査ログに「マッチしたルール」が必ず残る
+
+---
+
+## 10. MVPの納品物
+
+* 管理API（CRUD：APIキー、ポリシー）
+* 実行API（/v1/execute）
+* 管理UI（簡易でOK：一覧・詳細・ログ）
+* 監査ログ基盤（DB保存）
+* デプロイ手順（README）
+* テスト一式（CIで回る）
+

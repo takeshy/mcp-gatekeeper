@@ -16,10 +16,11 @@ import (
 
 func main() {
 	var (
-		mode    = flag.String("mode", "stdio", "Server mode: stdio or http")
-		dbPath  = flag.String("db", "gatekeeper.db", "SQLite database path")
-		addr    = flag.String("addr", ":8080", "HTTP server address (for http mode)")
-		apiKey  = flag.String("api-key", "", "API key for stdio mode (or MCP_GATEKEEPER_API_KEY env var)")
+		mode      = flag.String("mode", "stdio", "Server mode: stdio or http")
+		dbPath    = flag.String("db", "gatekeeper.db", "SQLite database path")
+		addr      = flag.String("addr", ":8080", "HTTP server address (for http mode)")
+		apiKey    = flag.String("api-key", "", "API key for stdio mode (or MCP_GATEKEEPER_API_KEY env var)")
+		rateLimit = flag.Int("rate-limit", 500, "Rate limit per API key per minute (for http mode)")
 	)
 	flag.Parse()
 
@@ -44,7 +45,7 @@ func main() {
 			os.Exit(1)
 		}
 	case "http":
-		if err := runHTTP(database, *addr); err != nil {
+		if err := runHTTP(database, *addr, *rateLimit); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -78,8 +79,12 @@ func runStdio(database *db.DB, apiKey string) error {
 	return server.Run(ctx)
 }
 
-func runHTTP(database *db.DB, addr string) error {
-	server := mcp.NewHTTPServer(database, nil)
+func runHTTP(database *db.DB, addr string, rateLimit int) error {
+	config := &mcp.HTTPConfig{
+		RateLimit:       rateLimit,
+		RateLimitWindow: time.Minute,
+	}
+	server := mcp.NewHTTPServer(database, config)
 
 	httpServer := &http.Server{
 		Addr:         addr,
