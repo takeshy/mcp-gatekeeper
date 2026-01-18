@@ -67,7 +67,6 @@ type HTTPServer struct {
 	db          *db.DB
 	auth        *auth.Authenticator
 	evaluator   *policy.Evaluator
-	normalizer  *executor.Normalizer
 	executor    *executor.Executor
 	rateLimiter *RateLimiter
 	router      chi.Router
@@ -78,7 +77,6 @@ type HTTPConfig struct {
 	RateLimit       int
 	RateLimitWindow time.Duration
 	RootDir         string
-	SandboxMode     executor.SandboxMode
 }
 
 // DefaultHTTPConfig returns the default HTTP configuration
@@ -96,17 +94,15 @@ func NewHTTPServer(database *db.DB, config *HTTPConfig) *HTTPServer {
 	}
 
 	execConfig := &executor.ExecutorConfig{
-		Timeout:     executor.DefaultTimeout,
-		MaxOutput:   executor.DefaultMaxOutput,
-		RootDir:     config.RootDir,
-		SandboxMode: config.SandboxMode,
+		Timeout:   executor.DefaultTimeout,
+		MaxOutput: executor.DefaultMaxOutput,
+		RootDir:   config.RootDir,
 	}
 
 	s := &HTTPServer{
 		db:          database,
 		auth:        auth.NewAuthenticator(database),
 		evaluator:   policy.NewEvaluator(),
-		normalizer:  executor.NewNormalizer(),
 		executor:    executor.NewExecutor(execConfig),
 		rateLimiter: NewRateLimiter(config.RateLimit, config.RateLimitWindow),
 	}
@@ -129,7 +125,8 @@ func (s *HTTPServer) setupRoutes() {
 	// API v1 routes
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(s.authMiddleware)
-		r.Post("/execute", s.handleExecute)
+		r.Get("/tools", s.handleListTools)
+		r.Post("/tools/{toolName}", s.handleToolCall)
 	})
 
 	s.router = r
@@ -175,17 +172,9 @@ func (s *HTTPServer) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Get policy
-		pol, err := s.db.GetPolicyByAPIKeyID(apiKey.ID)
-		if err != nil || pol == nil {
-			s.writeError(w, http.StatusForbidden, "no policy configured for this API key")
-			return
-		}
-
 		// Store in context
 		ctx := r.Context()
 		ctx = contextWithAPIKey(ctx, apiKey)
-		ctx = contextWithPolicy(ctx, pol)
 
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -195,50 +184,87 @@ func (s *HTTPServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// ExecuteRequest represents the execute API request
-type ExecuteRequest struct {
+// ToolListResponse represents the list tools response
+type ToolListResponse struct {
+	Tools []ToolInfo `json:"tools"`
+}
+
+// ToolInfo represents tool information in the list response
+type ToolInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Command     string `json:"command"`
+	Sandbox     string `json:"sandbox"`
+}
+
+func (s *HTTPServer) handleListTools(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	apiKey := apiKeyFromContext(ctx)
+
+	tools, err := s.db.ListToolsByAPIKeyID(apiKey.ID)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to list tools: %v", err))
+		return
+	}
+
+	response := ToolListResponse{
+		Tools: make([]ToolInfo, len(tools)),
+	}
+	for i, t := range tools {
+		response.Tools[i] = ToolInfo{
+			Name:        t.Name,
+			Description: t.Description,
+			Command:     t.Command,
+			Sandbox:     string(t.Sandbox),
+		}
+	}
+
+	s.writeJSON(w, http.StatusOK, response)
+}
+
+// ToolCallRequest represents the tool call request
+type ToolCallRequest struct {
 	Cwd  string   `json:"cwd"`
-	Cmd  string   `json:"cmd"`
 	Args []string `json:"args,omitempty"`
 }
 
-// ExecuteResponse represents the execute API response
-type ExecuteResponse struct {
+// ToolCallResponse represents the tool call response
+type ToolCallResponse struct {
 	ExitCode   int    `json:"exit_code"`
 	Stdout     string `json:"stdout"`
 	Stderr     string `json:"stderr"`
 	DurationMs int64  `json:"duration_ms"`
 }
 
-func (s *HTTPServer) handleExecute(w http.ResponseWriter, r *http.Request) {
+func (s *HTTPServer) handleToolCall(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	apiKey := apiKeyFromContext(ctx)
-	pol := policyFromContext(ctx)
+	toolName := chi.URLParam(r, "toolName")
 
-	var req ExecuteRequest
+	// Get tool
+	tool, err := s.db.GetToolByAPIKeyAndName(apiKey.ID, toolName)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to get tool: %v", err))
+		return
+	}
+	if tool == nil {
+		s.writeError(w, http.StatusNotFound, fmt.Sprintf("tool not found: %s", toolName))
+		return
+	}
+
+	var req ToolCallRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
 
-	if req.Cwd == "" || req.Cmd == "" {
-		s.writeError(w, http.StatusBadRequest, "cwd and cmd are required")
-		return
-	}
-
-	// Normalize command
-	normalized, err := s.normalizer.Normalize(req.Cwd, req.Cmd, req.Args)
-	if err != nil {
-		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("failed to normalize command: %v", err))
+	if req.Cwd == "" {
+		s.writeError(w, http.StatusBadRequest, "cwd is required")
 		return
 	}
 
 	// Evaluate policy
-	evalReq := &policy.EvaluateRequest{
-		Cwd:     normalized.Cwd,
-		Cmdline: normalized.Cmdline,
-	}
-	decision, err := s.evaluator.Evaluate(pol, evalReq)
+	decision, err := s.evaluator.EvaluateArgs(tool, req.Args)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("policy evaluation failed: %v", err))
 		return
@@ -248,24 +274,28 @@ func (s *HTTPServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	auditLog := &db.AuditLog{
 		APIKeyID:          apiKey.ID,
 		RequestedCwd:      req.Cwd,
-		RequestedCmd:      req.Cmd,
+		RequestedCmd:      tool.Command,
 		RequestedArgs:     req.Args,
-		NormalizedCwd:     normalized.Cwd,
-		NormalizedCmdline: normalized.Cmdline,
+		NormalizedCwd:     req.Cwd,
+		NormalizedCmdline: tool.Command + " " + strings.Join(req.Args, " "),
 		MatchedRules:      decision.MatchedRules,
 	}
 
 	if !decision.Allowed {
 		auditLog.Decision = db.DecisionDeny
 		s.db.CreateAuditLog(auditLog)
-		s.writeError(w, http.StatusForbidden, fmt.Sprintf("command denied by policy: %s", decision.Reason))
+		s.writeError(w, http.StatusForbidden, fmt.Sprintf("arguments denied by policy: %s", decision.Reason))
 		return
 	}
 
 	auditLog.Decision = db.DecisionAllow
 
-	// Execute command
-	result, err := s.executor.Execute(ctx, normalized.Cwd, normalized.Cmd, req.Args, os.Environ())
+	// Filter environment variables
+	filteredEnvKeys := s.evaluator.FilterEnvKeys(apiKey.AllowedEnvKeys, getEnvKeys(os.Environ()))
+	filteredEnv := filterEnvByKeys(os.Environ(), filteredEnvKeys)
+
+	// Execute command using the tool's sandbox setting
+	result, err := s.executor.ExecuteWithSandbox(ctx, req.Cwd, tool.Command, req.Args, filteredEnv, tool.Sandbox, tool.WasmBinary)
 	if err != nil {
 		auditLog.Stderr = err.Error()
 		s.db.CreateAuditLog(auditLog)
@@ -283,7 +313,7 @@ func (s *HTTPServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	s.db.CreateAuditLog(auditLog)
 
 	// Return response
-	resp := &ExecuteResponse{
+	resp := &ToolCallResponse{
 		ExitCode:   result.ExitCode,
 		Stdout:     result.Stdout,
 		Stderr:     result.Stderr,
@@ -307,7 +337,6 @@ type contextKey string
 
 const (
 	apiKeyContextKey contextKey = "apiKey"
-	policyContextKey contextKey = "policy"
 )
 
 func contextWithAPIKey(ctx context.Context, apiKey *db.APIKey) context.Context {
@@ -317,17 +346,6 @@ func contextWithAPIKey(ctx context.Context, apiKey *db.APIKey) context.Context {
 func apiKeyFromContext(ctx context.Context) *db.APIKey {
 	if v := ctx.Value(apiKeyContextKey); v != nil {
 		return v.(*db.APIKey)
-	}
-	return nil
-}
-
-func contextWithPolicy(ctx context.Context, pol *db.Policy) context.Context {
-	return context.WithValue(ctx, policyContextKey, pol)
-}
-
-func policyFromContext(ctx context.Context) *db.Policy {
-	if v := ctx.Value(policyContextKey); v != nil {
-		return v.(*db.Policy)
 	}
 	return nil
 }

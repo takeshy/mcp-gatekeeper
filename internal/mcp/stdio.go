@@ -26,17 +26,16 @@ type StdioServer struct {
 	db          *db.DB
 	auth        *auth.Authenticator
 	evaluator   *policy.Evaluator
-	normalizer  *executor.Normalizer
 	executor    *executor.Executor
 	initialized bool
 	apiKey      *db.APIKey
-	policy      *db.Policy
 	reader      *bufio.Reader
 	writer      io.Writer
+	rootDir     string
 }
 
 // NewStdioServer creates a new stdio MCP server
-func NewStdioServer(database *db.DB, apiKeyStr string, rootDir string, sandboxMode executor.SandboxMode) (*StdioServer, error) {
+func NewStdioServer(database *db.DB, apiKeyStr string, rootDir string) (*StdioServer, error) {
 	authenticator := auth.NewAuthenticator(database)
 
 	// Authenticate API key
@@ -48,32 +47,21 @@ func NewStdioServer(database *db.DB, apiKeyStr string, rootDir string, sandboxMo
 		return nil, fmt.Errorf("invalid API key")
 	}
 
-	// Get policy
-	pol, err := database.GetPolicyByAPIKeyID(apiKey.ID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get policy: %w", err)
-	}
-	if pol == nil {
-		return nil, fmt.Errorf("no policy found for API key")
-	}
-
 	execConfig := &executor.ExecutorConfig{
-		Timeout:     executor.DefaultTimeout,
-		MaxOutput:   executor.DefaultMaxOutput,
-		RootDir:     rootDir,
-		SandboxMode: sandboxMode,
+		Timeout:   executor.DefaultTimeout,
+		MaxOutput: executor.DefaultMaxOutput,
+		RootDir:   rootDir,
 	}
 
 	return &StdioServer{
-		db:         database,
-		auth:       authenticator,
-		evaluator:  policy.NewEvaluator(),
-		normalizer: executor.NewNormalizer(),
-		executor:   executor.NewExecutor(execConfig),
-		apiKey:     apiKey,
-		policy:     pol,
-		reader:     bufio.NewReader(os.Stdin),
-		writer:     os.Stdout,
+		db:        database,
+		auth:      authenticator,
+		evaluator: policy.NewEvaluator(),
+		executor:  executor.NewExecutor(execConfig),
+		apiKey:    apiKey,
+		reader:    bufio.NewReader(os.Stdin),
+		writer:    os.Stdout,
+		rootDir:   rootDir,
 	}, nil
 }
 
@@ -181,10 +169,17 @@ func (s *StdioServer) handleInitialize(req *Request) (*Response, error) {
 }
 
 func (s *StdioServer) handleToolsList(req *Request) (*Response, error) {
-	tools := []Tool{
-		{
-			Name:        "execute",
-			Description: "Execute a shell command",
+	// Get tools from database for this API key
+	dbTools, err := s.db.ListToolsByAPIKeyID(s.apiKey.ID)
+	if err != nil {
+		return NewErrorResponse(req.ID, InternalError, "Failed to list tools", err.Error()), nil
+	}
+
+	tools := make([]Tool, len(dbTools))
+	for i, t := range dbTools {
+		tools[i] = Tool{
+			Name:        t.Name,
+			Description: t.Description,
 			InputSchema: InputSchema{
 				Type: "object",
 				Properties: map[string]Property{
@@ -192,19 +187,15 @@ func (s *StdioServer) handleToolsList(req *Request) (*Response, error) {
 						Type:        "string",
 						Description: "Working directory for the command",
 					},
-					"cmd": {
-						Type:        "string",
-						Description: "Command to execute",
-					},
 					"args": {
 						Type:        "array",
 						Description: "Command arguments",
 						Items:       &Items{Type: "string"},
 					},
 				},
-				Required: []string{"cwd", "cmd"},
+				Required: []string{"cwd"},
 			},
-		},
+		}
 	}
 	return NewResponse(req.ID, &ListToolsResult{Tools: tools}), nil
 }
@@ -215,18 +206,21 @@ func (s *StdioServer) handleToolsCall(ctx context.Context, req *Request) (*Respo
 		return NewErrorResponse(req.ID, InvalidParams, "Invalid params", err.Error()), nil
 	}
 
-	switch params.Name {
-	case "execute":
-		return s.handleExecute(ctx, req.ID, params.Arguments)
-	default:
+	// Look up tool by name for this API key
+	tool, err := s.db.GetToolByAPIKeyAndName(s.apiKey.ID, params.Name)
+	if err != nil {
+		return NewErrorResponse(req.ID, InternalError, "Failed to get tool", err.Error()), nil
+	}
+	if tool == nil {
 		return NewErrorResponse(req.ID, MethodNotFound, "Tool not found", params.Name), nil
 	}
+
+	return s.handleExecute(ctx, req.ID, tool, params.Arguments)
 }
 
-func (s *StdioServer) handleExecute(ctx context.Context, id json.RawMessage, args map[string]interface{}) (*Response, error) {
+func (s *StdioServer) handleExecute(ctx context.Context, id json.RawMessage, tool *db.Tool, args map[string]interface{}) (*Response, error) {
 	// Parse arguments
 	cwd, _ := args["cwd"].(string)
-	cmd, _ := args["cmd"].(string)
 	var cmdArgs []string
 	if argsRaw, ok := args["args"].([]interface{}); ok {
 		for _, a := range argsRaw {
@@ -236,22 +230,12 @@ func (s *StdioServer) handleExecute(ctx context.Context, id json.RawMessage, arg
 		}
 	}
 
-	if cwd == "" || cmd == "" {
-		return NewErrorResponse(id, InvalidParams, "cwd and cmd are required", nil), nil
+	if cwd == "" {
+		return NewErrorResponse(id, InvalidParams, "cwd is required", nil), nil
 	}
 
-	// Normalize command
-	normalized, err := s.normalizer.Normalize(cwd, cmd, cmdArgs)
-	if err != nil {
-		return NewErrorResponse(id, ExecutionFailed, "Failed to normalize command", err.Error()), nil
-	}
-
-	// Evaluate policy
-	evalReq := &policy.EvaluateRequest{
-		Cwd:     normalized.Cwd,
-		Cmdline: normalized.Cmdline,
-	}
-	decision, err := s.evaluator.Evaluate(s.policy, evalReq)
+	// Evaluate policy (check if args are allowed)
+	decision, err := s.evaluator.EvaluateArgs(tool, cmdArgs)
 	if err != nil {
 		return NewErrorResponse(id, InternalError, "Policy evaluation failed", err.Error()), nil
 	}
@@ -260,23 +244,27 @@ func (s *StdioServer) handleExecute(ctx context.Context, id json.RawMessage, arg
 	auditLog := &db.AuditLog{
 		APIKeyID:          s.apiKey.ID,
 		RequestedCwd:      cwd,
-		RequestedCmd:      cmd,
+		RequestedCmd:      tool.Command,
 		RequestedArgs:     cmdArgs,
-		NormalizedCwd:     normalized.Cwd,
-		NormalizedCmdline: normalized.Cmdline,
+		NormalizedCwd:     cwd,
+		NormalizedCmdline: tool.Command + " " + strings.Join(cmdArgs, " "),
 		MatchedRules:      decision.MatchedRules,
 	}
 
 	if !decision.Allowed {
 		auditLog.Decision = db.DecisionDeny
 		s.db.CreateAuditLog(auditLog)
-		return NewErrorResponse(id, PolicyDenied, "Command denied by policy", decision.Reason), nil
+		return NewErrorResponse(id, PolicyDenied, "Arguments denied by policy", decision.Reason), nil
 	}
 
 	auditLog.Decision = db.DecisionAllow
 
-	// Execute command
-	result, err := s.executor.Execute(ctx, normalized.Cwd, normalized.Cmd, cmdArgs, os.Environ())
+	// Filter environment variables
+	filteredEnvKeys := s.evaluator.FilterEnvKeys(s.apiKey.AllowedEnvKeys, getEnvKeys(os.Environ()))
+	filteredEnv := filterEnvByKeys(os.Environ(), filteredEnvKeys)
+
+	// Execute command using the tool's sandbox setting
+	result, err := s.executor.ExecuteWithSandbox(ctx, cwd, tool.Command, cmdArgs, filteredEnv, tool.Sandbox, tool.WasmBinary)
 	if err != nil {
 		auditLog.Stderr = err.Error()
 		s.db.CreateAuditLog(auditLog)
@@ -320,4 +308,40 @@ func (s *StdioServer) writeResponse(resp *Response) error {
 	}
 	_, err = fmt.Fprintf(s.writer, "%s\n", data)
 	return err
+}
+
+// getEnvKeys extracts environment variable keys from env list
+func getEnvKeys(env []string) []string {
+	keys := make([]string, 0, len(env))
+	for _, e := range env {
+		for i, c := range e {
+			if c == '=' {
+				keys = append(keys, e[:i])
+				break
+			}
+		}
+	}
+	return keys
+}
+
+// filterEnvByKeys filters environment variables by allowed keys
+func filterEnvByKeys(env []string, allowedKeys []string) []string {
+	allowedSet := make(map[string]bool)
+	for _, key := range allowedKeys {
+		allowedSet[key] = true
+	}
+
+	var filtered []string
+	for _, e := range env {
+		for i, c := range e {
+			if c == '=' {
+				key := e[:i]
+				if allowedSet[key] {
+					filtered = append(filtered, e)
+				}
+				break
+			}
+		}
+	}
+	return filtered
 }

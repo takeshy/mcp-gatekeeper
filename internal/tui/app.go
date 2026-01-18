@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"fmt"
+
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
@@ -17,7 +19,11 @@ const (
 	ScreenAPIKeys
 	ScreenAPIKeyCreate
 	ScreenAPIKeyDetail
-	ScreenPolicyEdit
+	ScreenToolList
+	ScreenToolCreate
+	ScreenToolDetail
+	ScreenToolEdit
+	ScreenEnvKeysEdit
 	ScreenAuditLogs
 	ScreenAuditLogDetail
 	ScreenTestExecute
@@ -135,10 +141,15 @@ type App struct {
 	apiKeyList       *APIKeyListModel
 	apiKeyCreate     *APIKeyCreateModel
 	apiKeyDetail     *APIKeyDetailModel
-	policyEdit       *PolicyEditModel
+	toolList         *ToolListModel
+	toolCreate       *ToolCreateModel
+	toolDetail       *ToolDetailModel
+	toolEdit         *ToolEditModel
+	envKeysEdit      *EnvKeysEditModel
 	auditLogList     *AuditLogListModel
 	auditLogDetail   *AuditLogDetailModel
 	testExecute      *TestExecuteModel
+	selectedAPIKey   *db.APIKey // Currently selected API key for tool operations
 }
 
 // NewApp creates a new TUI application
@@ -192,8 +203,16 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.updateAPIKeyCreate(msg)
 	case ScreenAPIKeyDetail:
 		return a.updateAPIKeyDetail(msg)
-	case ScreenPolicyEdit:
-		return a.updatePolicyEdit(msg)
+	case ScreenToolList:
+		return a.updateToolList(msg)
+	case ScreenToolCreate:
+		return a.updateToolCreate(msg)
+	case ScreenToolDetail:
+		return a.updateToolDetail(msg)
+	case ScreenToolEdit:
+		return a.updateToolEdit(msg)
+	case ScreenEnvKeysEdit:
+		return a.updateEnvKeysEdit(msg)
 	case ScreenAuditLogs:
 		return a.updateAuditLogs(msg)
 	case ScreenAuditLogDetail:
@@ -216,8 +235,16 @@ func (a *App) View() string {
 		return a.viewAPIKeyCreate()
 	case ScreenAPIKeyDetail:
 		return a.viewAPIKeyDetail()
-	case ScreenPolicyEdit:
-		return a.viewPolicyEdit()
+	case ScreenToolList:
+		return a.viewToolList()
+	case ScreenToolCreate:
+		return a.viewToolCreate()
+	case ScreenToolDetail:
+		return a.viewToolDetail()
+	case ScreenToolEdit:
+		return a.viewToolEdit()
+	case ScreenEnvKeysEdit:
+		return a.viewEnvKeysEdit()
 	case ScreenAuditLogs:
 		return a.viewAuditLogs()
 	case ScreenAuditLogDetail:
@@ -281,4 +308,166 @@ func (a *App) viewMain() string {
 		a.mainList.View(),
 		helpStyle.Render("\n  q: quit • enter: select"),
 	)
+}
+
+// Tool screen handlers
+func (a *App) updateToolList(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		if key.Matches(msg, keys.Back) {
+			a.popScreen()
+			return a, nil
+		}
+		if key.Matches(msg, keys.New) {
+			a.toolCreate = NewToolCreateModel(a.db, a.selectedAPIKey.ID)
+			a.pushScreen(ScreenToolCreate)
+			return a, a.toolCreate.Init()
+		}
+		if key.Matches(msg, keys.Enter) {
+			if selected := a.toolList.SelectedTool(); selected != nil {
+				a.toolDetail = NewToolDetailModel(a.db, selected)
+				a.pushScreen(ScreenToolDetail)
+				return a, a.toolDetail.Init()
+			}
+		}
+		if key.Matches(msg, keys.Delete) {
+			if selected := a.toolList.SelectedTool(); selected != nil {
+				if err := a.db.DeleteTool(selected.ID); err != nil {
+					a.err = err
+				} else {
+					a.message = "Tool deleted"
+				}
+				return a, a.toolList.loadTools
+			}
+		}
+		if key.Matches(msg, keys.Edit) {
+			if selected := a.toolList.SelectedTool(); selected != nil {
+				a.toolEdit = NewToolEditModel(a.db, selected)
+				a.pushScreen(ScreenToolEdit)
+				return a, a.toolEdit.Init()
+			}
+		}
+	}
+
+	var cmd tea.Cmd
+	a.toolList, cmd = a.toolList.Update(msg)
+	return a, cmd
+}
+
+func (a *App) updateToolCreate(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		if key.Matches(msg, keys.Back) {
+			a.popScreen()
+			return a, a.toolList.loadTools
+		}
+	}
+
+	var cmd tea.Cmd
+	a.toolCreate, cmd = a.toolCreate.Update(msg)
+	return a, cmd
+}
+
+func (a *App) updateToolDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		if key.Matches(msg, keys.Back) {
+			a.popScreen()
+			return a, nil
+		}
+		if key.Matches(msg, keys.Edit) {
+			a.toolEdit = NewToolEditModel(a.db, a.toolDetail.tool)
+			a.pushScreen(ScreenToolEdit)
+			return a, a.toolEdit.Init()
+		}
+		if key.Matches(msg, keys.Delete) {
+			if err := a.db.DeleteTool(a.toolDetail.tool.ID); err != nil {
+				a.err = err
+			} else {
+				a.message = "Tool deleted"
+				a.popScreen()
+				return a, a.toolList.loadTools
+			}
+		}
+	}
+
+	var cmd tea.Cmd
+	a.toolDetail, cmd = a.toolDetail.Update(msg)
+	return a, cmd
+}
+
+func (a *App) updateToolEdit(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		if key.Matches(msg, keys.Back) {
+			a.popScreen()
+			return a, a.toolList.loadTools
+		}
+	}
+
+	var cmd tea.Cmd
+	a.toolEdit, cmd = a.toolEdit.Update(msg)
+	return a, cmd
+}
+
+func (a *App) updateEnvKeysEdit(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		if key.Matches(msg, keys.Back) && !a.envKeysEdit.showCompletion {
+			a.popScreen()
+			return a, nil
+		}
+	case envKeysSavedMsg:
+		a.envKeysEdit.saved = true
+		return a, nil
+	case errMsg:
+		a.envKeysEdit.err = msg.err
+		return a, nil
+	}
+
+	var cmd tea.Cmd
+	a.envKeysEdit, cmd = a.envKeysEdit.Update(msg)
+	return a, cmd
+}
+
+func (a *App) viewToolList() string {
+	if a.toolList == nil {
+		return "Loading..."
+	}
+	view := a.toolList.View()
+	if a.message != "" {
+		view += "\n" + successStyle.Render(a.message)
+	}
+	if a.err != nil {
+		view += "\n" + errorStyle.Render(fmt.Sprintf("Error: %v", a.err))
+	}
+	return view
+}
+
+func (a *App) viewToolCreate() string {
+	if a.toolCreate == nil {
+		return "Loading..."
+	}
+	return a.toolCreate.View()
+}
+
+func (a *App) viewToolDetail() string {
+	if a.toolDetail == nil {
+		return "Loading..."
+	}
+	return a.toolDetail.View()
+}
+
+func (a *App) viewToolEdit() string {
+	if a.toolEdit == nil {
+		return "Loading..."
+	}
+	return a.toolEdit.View()
+}
+
+func (a *App) viewEnvKeysEdit() string {
+	if a.envKeysEdit == nil {
+		return "Loading..."
+	}
+	return a.envKeysEdit.View()
 }

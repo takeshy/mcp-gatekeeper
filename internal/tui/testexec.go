@@ -22,20 +22,21 @@ type TestExecuteModel struct {
 	width        int
 	height       int
 	apiKeyList   list.Model
+	toolList     list.Model
 	selectedKey  *db.APIKey
-	selectedPol  *db.Policy
+	selectedTool *db.Tool
 	inputs       []textinput.Model
 	focusedField int
 	result       *TestResult
 	err          error
-	step         int // 0: select key, 1: enter command, 2: show result
+	step         int // 0: select key, 1: select tool, 2: enter args, 3: show result
 }
 
 // TestResult represents the test execution result
 type TestResult struct {
-	Decision     *policy.Decision
-	ExecResult   *executor.ExecuteResult
-	NormalizedCmd *executor.NormalizedCommand
+	Decision   *policy.Decision
+	ExecResult *executor.ExecuteResult
+	Cmdline    string
 }
 
 // NewTestExecuteModel creates a new test execution model
@@ -46,8 +47,14 @@ func NewTestExecuteModel(database *db.DB, width, height int) *TestExecuteModel {
 	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(true)
 
+	// Tool list
+	tl := list.New(nil, list.NewDefaultDelegate(), width-4, height-12)
+	tl.Title = "Select Tool"
+	tl.SetShowStatusBar(false)
+	tl.SetFilteringEnabled(true)
+
 	// Command inputs
-	inputs := make([]textinput.Model, 3)
+	inputs := make([]textinput.Model, 2)
 
 	cwd := textinput.New()
 	cwd.Placeholder = "Working directory"
@@ -55,23 +62,19 @@ func NewTestExecuteModel(database *db.DB, width, height int) *TestExecuteModel {
 	cwd.SetValue(os.Getenv("HOME"))
 	inputs[0] = cwd
 
-	cmd := textinput.New()
-	cmd.Placeholder = "Command (e.g., ls)"
-	cmd.Width = 60
-	inputs[1] = cmd
-
 	args := textinput.New()
 	args.Placeholder = "Arguments (space-separated)"
 	args.Width = 60
-	inputs[2] = args
+	inputs[1] = args
 
 	return &TestExecuteModel{
-		db:     database,
-		width:  width,
-		height: height,
+		db:         database,
+		width:      width,
+		height:     height,
 		apiKeyList: l,
-		inputs: inputs,
-		step:   0,
+		toolList:   tl,
+		inputs:     inputs,
+		step:       0,
 	}
 }
 
@@ -88,6 +91,14 @@ func (m *TestExecuteModel) loadAPIKeys() tea.Msg {
 	return apiKeysMsg{keys}
 }
 
+func (m *TestExecuteModel) loadTools() tea.Msg {
+	tools, err := m.db.ListToolsByAPIKeyID(m.selectedKey.ID)
+	if err != nil {
+		return errMsg{err}
+	}
+	return toolsMsg{tools}
+}
+
 // Update handles messages
 func (m *TestExecuteModel) Update(msg tea.Msg) (*TestExecuteModel, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -101,13 +112,24 @@ func (m *TestExecuteModel) Update(msg tea.Msg) (*TestExecuteModel, tea.Cmd) {
 		m.apiKeyList.SetItems(items)
 		return m, nil
 
+	case toolsMsg:
+		items := make([]list.Item, len(msg.tools))
+		for i, t := range msg.tools {
+			items[i] = ToolItem{tool: t}
+		}
+		m.toolList.SetItems(items)
+		if len(items) == 0 {
+			m.err = fmt.Errorf("no tools configured for this API key")
+		}
+		return m, nil
+
 	case errMsg:
 		m.err = msg.err
 		return m, nil
 
 	case testResultMsg:
 		m.result = msg.result
-		m.step = 2
+		m.step = 3
 		return m, nil
 
 	case tea.KeyMsg:
@@ -116,22 +138,36 @@ func (m *TestExecuteModel) Update(msg tea.Msg) (*TestExecuteModel, tea.Cmd) {
 			if key.Matches(msg, keys.Enter) {
 				if item, ok := m.apiKeyList.SelectedItem().(APIKeyItem); ok {
 					m.selectedKey = item.key
-					pol, err := m.db.GetPolicyByAPIKeyID(item.key.ID)
-					if err != nil || pol == nil {
-						m.err = fmt.Errorf("no policy found for API key")
-						return m, nil
-					}
-					m.selectedPol = pol
 					m.step = 1
-					m.inputs[0].Focus()
-					return m, textinput.Blink
+					m.err = nil
+					return m, m.loadTools
 				}
 			}
 			var cmd tea.Cmd
 			m.apiKeyList, cmd = m.apiKeyList.Update(msg)
 			return m, cmd
 
-		case 1: // Enter command
+		case 1: // Select tool
+			switch msg.String() {
+			case "esc":
+				m.step = 0
+				m.err = nil
+				return m, nil
+			}
+			if key.Matches(msg, keys.Enter) {
+				if item, ok := m.toolList.SelectedItem().(ToolItem); ok {
+					m.selectedTool = item.tool
+					m.step = 2
+					m.inputs[0].Focus()
+					m.err = nil
+					return m, textinput.Blink
+				}
+			}
+			var cmd tea.Cmd
+			m.toolList, cmd = m.toolList.Update(msg)
+			return m, cmd
+
+		case 2: // Enter args
 			switch msg.String() {
 			case "tab", "shift+tab":
 				if msg.String() == "tab" {
@@ -148,11 +184,9 @@ func (m *TestExecuteModel) Update(msg tea.Msg) (*TestExecuteModel, tea.Cmd) {
 				}
 				return m, nil
 			case "enter":
-				if m.inputs[1].Value() != "" { // cmd is required
-					return m, m.runTest
-				}
+				return m, m.runTest
 			case "esc":
-				m.step = 0
+				m.step = 1
 				m.result = nil
 				m.err = nil
 				return m, nil
@@ -162,10 +196,10 @@ func (m *TestExecuteModel) Update(msg tea.Msg) (*TestExecuteModel, tea.Cmd) {
 			m.inputs[m.focusedField], cmd = m.inputs[m.focusedField].Update(msg)
 			return m, cmd
 
-		case 2: // Show result
+		case 3: // Show result
 			switch msg.String() {
 			case "esc", "enter":
-				m.step = 1
+				m.step = 2
 				m.result = nil
 				m.err = nil
 				return m, nil
@@ -182,41 +216,32 @@ type testResultMsg struct {
 
 func (m *TestExecuteModel) runTest() tea.Msg {
 	cwd := m.inputs[0].Value()
-	cmd := m.inputs[1].Value()
-	argsStr := m.inputs[2].Value()
+	argsStr := m.inputs[1].Value()
 
 	var args []string
 	if argsStr != "" {
 		args = strings.Fields(argsStr)
 	}
 
-	// Normalize command
-	normalizer := executor.NewNormalizer()
-	normalized, err := normalizer.Normalize(cwd, cmd, args)
-	if err != nil {
-		return errMsg{err}
-	}
+	// Build command line for display
+	cmdline := m.selectedTool.Command + " " + strings.Join(args, " ")
 
 	// Evaluate policy
 	evaluator := policy.NewEvaluator()
-	evalReq := &policy.EvaluateRequest{
-		Cwd:     normalized.Cwd,
-		Cmdline: normalized.Cmdline,
-	}
-	decision, err := evaluator.Evaluate(m.selectedPol, evalReq)
+	decision, err := evaluator.EvaluateArgs(m.selectedTool, args)
 	if err != nil {
 		return errMsg{err}
 	}
 
 	result := &TestResult{
-		Decision:      decision,
-		NormalizedCmd: normalized,
+		Decision: decision,
+		Cmdline:  cmdline,
 	}
 
 	// Execute if allowed
 	if decision.Allowed {
 		exec := executor.NewExecutor(nil)
-		execResult, err := exec.Execute(context.Background(), normalized.Cwd, normalized.Cmd, args, os.Environ())
+		execResult, err := exec.Execute(context.Background(), cwd, m.selectedTool.Command, args, os.Environ())
 		if err != nil {
 			return errMsg{err}
 		}
@@ -230,7 +255,7 @@ func (m *TestExecuteModel) runTest() tea.Msg {
 func (m *TestExecuteModel) View() string {
 	var sb strings.Builder
 
-	sb.WriteString(titleStyle.Render("Test Command Execution"))
+	sb.WriteString(titleStyle.Render("Test Tool Execution"))
 	sb.WriteString("\n\n")
 
 	switch m.step {
@@ -241,8 +266,20 @@ func (m *TestExecuteModel) View() string {
 
 	case 1:
 		sb.WriteString(fmt.Sprintf("API Key: %s (ID: %d)\n\n", m.selectedKey.Name, m.selectedKey.ID))
+		sb.WriteString(m.toolList.View())
+		sb.WriteString("\n")
+		if m.err != nil {
+			sb.WriteString(errorStyle.Render(fmt.Sprintf("Error: %v", m.err)))
+			sb.WriteString("\n")
+		}
+		sb.WriteString(helpStyle.Render("enter: select • esc: back"))
 
-		fieldNames := []string{"Working Directory:", "Command:", "Arguments:"}
+	case 2:
+		sb.WriteString(fmt.Sprintf("API Key: %s\n", m.selectedKey.Name))
+		sb.WriteString(fmt.Sprintf("Tool:    %s (%s)\n", m.selectedTool.Name, m.selectedTool.Command))
+		sb.WriteString(fmt.Sprintf("Sandbox: %s\n\n", m.selectedTool.Sandbox))
+
+		fieldNames := []string{"Working Directory:", "Arguments:"}
 		for i, input := range m.inputs {
 			style := normalStyle
 			if i == m.focusedField {
@@ -261,14 +298,10 @@ func (m *TestExecuteModel) View() string {
 
 		sb.WriteString(helpStyle.Render("tab: next field • enter: execute • esc: back"))
 
-	case 2:
-		sb.WriteString(fmt.Sprintf("API Key: %s\n\n", m.selectedKey.Name))
-
-		sb.WriteString(titleStyle.Render("Normalized Command"))
-		sb.WriteString("\n")
-		sb.WriteString(fmt.Sprintf("CWD:     %s\n", m.result.NormalizedCmd.Cwd))
-		sb.WriteString(fmt.Sprintf("Cmd:     %s\n", m.result.NormalizedCmd.Cmd))
-		sb.WriteString(fmt.Sprintf("Cmdline: %s\n", m.result.NormalizedCmd.Cmdline))
+	case 3:
+		sb.WriteString(fmt.Sprintf("API Key: %s\n", m.selectedKey.Name))
+		sb.WriteString(fmt.Sprintf("Tool:    %s\n", m.selectedTool.Name))
+		sb.WriteString(fmt.Sprintf("Cmdline: %s\n", m.result.Cmdline))
 		sb.WriteString("\n")
 
 		sb.WriteString(titleStyle.Render("Policy Decision"))
@@ -301,7 +334,7 @@ func (m *TestExecuteModel) View() string {
 		}
 
 		sb.WriteString("\n")
-		sb.WriteString(helpStyle.Render("esc/enter: try another command"))
+		sb.WriteString(helpStyle.Render("esc/enter: try another"))
 	}
 
 	return sb.String()

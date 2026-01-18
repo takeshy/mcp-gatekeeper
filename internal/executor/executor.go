@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/takeshy/mcp-gatekeeper/internal/db"
 )
 
 const (
@@ -20,10 +22,9 @@ const (
 
 // ExecutorConfig holds executor configuration
 type ExecutorConfig struct {
-	Timeout     time.Duration
-	MaxOutput   int
-	RootDir     string      // If set, restricts execution to this directory (jail/sandbox)
-	SandboxMode SandboxMode // Sandbox mode: none, bwrap, auto
+	Timeout   time.Duration
+	MaxOutput int
+	RootDir   string // If set, restricts execution to this directory (jail/sandbox)
 }
 
 // DefaultConfig returns the default executor configuration
@@ -45,8 +46,9 @@ type ExecuteResult struct {
 
 // Executor executes commands with timeout and output limits
 type Executor struct {
-	config  *ExecutorConfig
-	sandbox *Sandbox
+	config       *ExecutorConfig
+	sandbox      *Sandbox
+	wasmExecutor *WasmExecutor
 }
 
 // NewExecutor creates a new Executor
@@ -59,13 +61,10 @@ func NewExecutor(config *ExecutorConfig) *Executor {
 
 	// Initialize sandbox if root directory is set
 	if config.RootDir != "" {
+		// Initialize sandbox to check bwrap availability
 		sandboxConfig := &SandboxConfig{
-			Mode:    config.SandboxMode,
+			Mode:    SandboxAuto,
 			RootDir: config.RootDir,
-		}
-		// Default to auto mode if not specified
-		if sandboxConfig.Mode == "" {
-			sandboxConfig.Mode = SandboxAuto
 		}
 
 		sandbox, err := NewSandbox(sandboxConfig)
@@ -75,6 +74,9 @@ func NewExecutor(config *ExecutorConfig) *Executor {
 		} else {
 			e.sandbox = sandbox
 		}
+
+		// Initialize WASM executor
+		e.wasmExecutor = NewWasmExecutor(config.RootDir)
 	}
 
 	return e
@@ -296,4 +298,158 @@ func (e *Executor) GetSandboxMode() SandboxMode {
 // IsSandboxed returns true if commands are sandboxed with bwrap
 func (e *Executor) IsSandboxed() bool {
 	return e.sandbox != nil && e.sandbox.Mode() == SandboxBwrap
+}
+
+// ExecuteWithSandbox executes a command using the specified sandbox type from the tool
+func (e *Executor) ExecuteWithSandbox(ctx context.Context, cwd, cmd string, args []string, env []string, sandboxType db.SandboxType, wasmBinary string) (*ExecuteResult, error) {
+	switch sandboxType {
+	case db.SandboxTypeWasm:
+		if e.wasmExecutor == nil {
+			return nil, fmt.Errorf("WASM executor not initialized (root directory not set)")
+		}
+		if wasmBinary == "" {
+			return nil, fmt.Errorf("WASM binary path is required for WASM sandbox")
+		}
+		// For WASM, the wasmBinary is the WASM file to execute, and args are passed to it
+		return e.wasmExecutor.Execute(ctx, wasmBinary, cwd, args, env, e.config.Timeout, e.config.MaxOutput)
+
+	case db.SandboxTypeNone:
+		// Execute without any sandbox
+		return e.executeWithoutSandbox(ctx, cwd, cmd, args, env)
+
+	case db.SandboxTypeBubblewrap:
+		// Execute with bubblewrap sandbox
+		return e.executeWithBwrap(ctx, cwd, cmd, args, env)
+
+	default:
+		// Default to using the executor's configured sandbox mode
+		return e.Execute(ctx, cwd, cmd, args, env)
+	}
+}
+
+// executeWithoutSandbox executes a command without any sandboxing
+func (e *Executor) executeWithoutSandbox(ctx context.Context, cwd, cmd string, args []string, env []string) (*ExecuteResult, error) {
+	result := &ExecuteResult{}
+	startTime := time.Now()
+
+	// Basic path validation if root directory is configured
+	if e.config.RootDir != "" {
+		if err := e.validatePath(cwd); err != nil {
+			return nil, fmt.Errorf("cwd validation failed: %w", err)
+		}
+	}
+
+	// Create context with timeout
+	execCtx, cancel := context.WithTimeout(ctx, e.config.Timeout)
+	defer cancel()
+
+	// Create command
+	execCmd := exec.CommandContext(execCtx, cmd, args...)
+	execCmd.Dir = cwd
+	if len(env) > 0 {
+		execCmd.Env = env
+	}
+
+	// Capture output with limits
+	var stdout, stderr limitedBuffer
+	stdout.maxSize = e.config.MaxOutput
+	stderr.maxSize = e.config.MaxOutput
+	execCmd.Stdout = &stdout
+	execCmd.Stderr = &stderr
+
+	// Execute
+	err := execCmd.Run()
+
+	// Calculate duration
+	result.DurationMs = time.Since(startTime).Milliseconds()
+	result.Stdout = stdout.String()
+	result.Stderr = stderr.String()
+
+	// Handle exit code and errors
+	if err != nil {
+		if execCtx.Err() == context.DeadlineExceeded {
+			result.TimedOut = true
+			result.ExitCode = -1
+			result.Stderr = fmt.Sprintf("%s\n[execution timed out after %v]", result.Stderr, e.config.Timeout)
+		} else if exitErr, ok := err.(*exec.ExitError); ok {
+			result.ExitCode = exitErr.ExitCode()
+		} else {
+			return nil, fmt.Errorf("failed to execute command: %w", err)
+		}
+	}
+
+	// Add truncation notice if output was limited
+	if stdout.truncated {
+		result.Stdout += fmt.Sprintf("\n[output truncated, exceeded %d bytes]", e.config.MaxOutput)
+	}
+	if stderr.truncated {
+		result.Stderr += fmt.Sprintf("\n[output truncated, exceeded %d bytes]", e.config.MaxOutput)
+	}
+
+	return result, nil
+}
+
+// executeWithBwrap executes a command with bubblewrap sandbox
+func (e *Executor) executeWithBwrap(ctx context.Context, cwd, cmd string, args []string, env []string) (*ExecuteResult, error) {
+	if e.sandbox == nil || !e.sandbox.IsBwrapAvailable() {
+		return nil, fmt.Errorf("bubblewrap (bwrap) is required but not installed")
+	}
+
+	result := &ExecuteResult{}
+	startTime := time.Now()
+
+	// Wrap command with bwrap
+	actualCmd, actualArgs, err := e.sandbox.WrapCommand(cwd, cmd, args)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox validation failed: %w", err)
+	}
+
+	// Create context with timeout
+	execCtx, cancel := context.WithTimeout(ctx, e.config.Timeout)
+	defer cancel()
+
+	// Create command
+	execCmd := exec.CommandContext(execCtx, actualCmd, actualArgs...)
+	// Don't set Dir for bwrap (it sets it via --chdir)
+	if len(env) > 0 {
+		execCmd.Env = env
+	}
+
+	// Capture output with limits
+	var stdout, stderr limitedBuffer
+	stdout.maxSize = e.config.MaxOutput
+	stderr.maxSize = e.config.MaxOutput
+	execCmd.Stdout = &stdout
+	execCmd.Stderr = &stderr
+
+	// Execute
+	err = execCmd.Run()
+
+	// Calculate duration
+	result.DurationMs = time.Since(startTime).Milliseconds()
+	result.Stdout = stdout.String()
+	result.Stderr = stderr.String()
+
+	// Handle exit code and errors
+	if err != nil {
+		if execCtx.Err() == context.DeadlineExceeded {
+			result.TimedOut = true
+			result.ExitCode = -1
+			result.Stderr = fmt.Sprintf("%s\n[execution timed out after %v]", result.Stderr, e.config.Timeout)
+		} else if exitErr, ok := err.(*exec.ExitError); ok {
+			result.ExitCode = exitErr.ExitCode()
+		} else {
+			return nil, fmt.Errorf("failed to execute command: %w", err)
+		}
+	}
+
+	// Add truncation notice if output was limited
+	if stdout.truncated {
+		result.Stdout += fmt.Sprintf("\n[output truncated, exceeded %d bytes]", e.config.MaxOutput)
+	}
+	if stderr.truncated {
+		result.Stderr += fmt.Sprintf("\n[output truncated, exceeded %d bytes]", e.config.MaxOutput)
+	}
+
+	return result, nil
 }

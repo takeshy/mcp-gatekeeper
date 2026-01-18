@@ -6,209 +6,207 @@ import (
 	"github.com/takeshy/mcp-gatekeeper/internal/db"
 )
 
-func TestEvaluator_Evaluate_DenyOverrides(t *testing.T) {
+func TestEvaluator_EvaluateArgs(t *testing.T) {
 	e := NewEvaluator()
 
 	tests := []struct {
 		name        string
-		policy      *db.Policy
-		req         *EvaluateRequest
+		tool        *db.Tool
+		args        []string
 		wantAllowed bool
 	}{
 		{
-			name: "allow all when no rules",
-			policy: &db.Policy{
-				Precedence:      db.PrecedenceDenyOverrides,
-				AllowedCwdGlobs: []string{},
-				AllowedCmdGlobs: []string{},
-				DeniedCmdGlobs:  []string{},
+			name: "allow all when no restrictions",
+			tool: &db.Tool{
+				Name:            "test-tool",
+				Command:         "/usr/bin/echo",
+				AllowedArgGlobs: []string{},
+				Sandbox:         db.SandboxTypeBubblewrap,
 			},
-			req: &EvaluateRequest{
-				Cwd:     "/home/user",
-				Cmdline: "ls -la",
-			},
+			args:        []string{"hello", "world"},
 			wantAllowed: true,
 		},
 		{
-			name: "deny by cwd",
-			policy: &db.Policy{
-				Precedence:      db.PrecedenceDenyOverrides,
-				AllowedCwdGlobs: []string{"/home/**"},
-				AllowedCmdGlobs: []string{},
-				DeniedCmdGlobs:  []string{},
+			name: "allow when args match pattern",
+			tool: &db.Tool{
+				Name:            "git-tool",
+				Command:         "/usr/bin/git",
+				AllowedArgGlobs: []string{"status *", "log *", "diff *"},
+				Sandbox:         db.SandboxTypeBubblewrap,
 			},
-			req: &EvaluateRequest{
-				Cwd:     "/var/lib",
-				Cmdline: "ls -la",
-			},
-			wantAllowed: false,
-		},
-		{
-			name: "allow by cwd",
-			policy: &db.Policy{
-				Precedence:      db.PrecedenceDenyOverrides,
-				AllowedCwdGlobs: []string{"/home/**"},
-				AllowedCmdGlobs: []string{},
-				DeniedCmdGlobs:  []string{},
-			},
-			req: &EvaluateRequest{
-				Cwd:     "/home/user",
-				Cmdline: "ls -la",
-			},
+			args:        []string{"status", "--short"},
 			wantAllowed: true,
 		},
 		{
-			name: "deny by cmd pattern",
-			policy: &db.Policy{
-				Precedence:      db.PrecedenceDenyOverrides,
-				AllowedCwdGlobs: []string{},
-				AllowedCmdGlobs: []string{"*"},
-				DeniedCmdGlobs:  []string{"rm *"},
+			name: "deny when args don't match pattern",
+			tool: &db.Tool{
+				Name:            "git-tool",
+				Command:         "/usr/bin/git",
+				AllowedArgGlobs: []string{"status *", "log *", "diff *"},
+				Sandbox:         db.SandboxTypeBubblewrap,
 			},
-			req: &EvaluateRequest{
-				Cwd:     "/home/user",
-				Cmdline: "rm -rf /",
-			},
+			args:        []string{"push", "origin", "main"},
 			wantAllowed: false,
 		},
 		{
-			name: "allow by cmd pattern",
-			policy: &db.Policy{
-				Precedence:      db.PrecedenceDenyOverrides,
-				AllowedCwdGlobs: []string{},
-				AllowedCmdGlobs: []string{"ls *", "cat *"},
-				DeniedCmdGlobs:  []string{},
+			name: "allow with wildcard pattern",
+			tool: &db.Tool{
+				Name:            "ls-tool",
+				Command:         "/bin/ls",
+				AllowedArgGlobs: []string{"**"},
+				Sandbox:         db.SandboxTypeBubblewrap,
 			},
-			req: &EvaluateRequest{
-				Cwd:     "/home/user",
-				Cmdline: "ls -la",
-			},
+			args:        []string{"-la", "/tmp"},
 			wantAllowed: true,
 		},
 		{
-			name: "deny overrides allow",
-			policy: &db.Policy{
-				Precedence:      db.PrecedenceDenyOverrides,
-				AllowedCwdGlobs: []string{},
-				AllowedCmdGlobs: []string{"*"},
-				DeniedCmdGlobs:  []string{"rm *"},
+			name: "allow empty args with empty pattern match",
+			tool: &db.Tool{
+				Name:            "pwd-tool",
+				Command:         "/bin/pwd",
+				AllowedArgGlobs: []string{""},
+				Sandbox:         db.SandboxTypeBubblewrap,
 			},
-			req: &EvaluateRequest{
-				Cwd:     "/home/user",
-				Cmdline: "rm file.txt",
-			},
-			wantAllowed: false,
+			args:        []string{},
+			wantAllowed: true,
 		},
 		{
-			name: "not in allow list",
-			policy: &db.Policy{
-				Precedence:      db.PrecedenceDenyOverrides,
-				AllowedCwdGlobs: []string{},
-				AllowedCmdGlobs: []string{"ls *", "cat *"},
-				DeniedCmdGlobs:  []string{},
+			name: "deny empty args when pattern requires args",
+			tool: &db.Tool{
+				Name:            "cat-tool",
+				Command:         "/bin/cat",
+				AllowedArgGlobs: []string{"*.txt"},
+				Sandbox:         db.SandboxTypeBubblewrap,
 			},
-			req: &EvaluateRequest{
-				Cwd:     "/home/user",
-				Cmdline: "rm file.txt",
-			},
+			args:        []string{},
 			wantAllowed: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			decision, err := e.Evaluate(tt.policy, tt.req)
+			decision, err := e.EvaluateArgs(tt.tool, tt.args)
 			if err != nil {
-				t.Errorf("Evaluate() error = %v", err)
+				t.Errorf("EvaluateArgs() error = %v", err)
 				return
 			}
 			if decision.Allowed != tt.wantAllowed {
-				t.Errorf("Evaluate() allowed = %v, want %v (reason: %s)", decision.Allowed, tt.wantAllowed, decision.Reason)
+				t.Errorf("EvaluateArgs() allowed = %v, want %v (reason: %s)", decision.Allowed, tt.wantAllowed, decision.Reason)
 			}
 		})
 	}
 }
 
-func TestEvaluator_Evaluate_AllowOverrides(t *testing.T) {
+func TestEvaluator_FilterEnvKeys(t *testing.T) {
 	e := NewEvaluator()
 
 	tests := []struct {
-		name        string
-		policy      *db.Policy
-		req         *EvaluateRequest
-		wantAllowed bool
+		name           string
+		allowedEnvKeys []string
+		envKeys        []string
+		wantCount      int
 	}{
 		{
-			name: "allow overrides deny",
-			policy: &db.Policy{
-				Precedence:      db.PrecedenceAllowOverrides,
-				AllowedCwdGlobs: []string{},
-				AllowedCmdGlobs: []string{"rm -i *"},
-				DeniedCmdGlobs:  []string{"rm *"},
-			},
-			req: &EvaluateRequest{
-				Cwd:     "/home/user",
-				Cmdline: "rm -i file.txt",
-			},
-			wantAllowed: true,
+			name:           "no restrictions returns all",
+			allowedEnvKeys: []string{},
+			envKeys:        []string{"PATH", "HOME", "USER"},
+			wantCount:      3,
 		},
 		{
-			name: "denied when not in allow",
-			policy: &db.Policy{
-				Precedence:      db.PrecedenceAllowOverrides,
-				AllowedCwdGlobs: []string{},
-				AllowedCmdGlobs: []string{"rm -i *"},
-				DeniedCmdGlobs:  []string{"rm *"},
-			},
-			req: &EvaluateRequest{
-				Cwd:     "/home/user",
-				Cmdline: "rm -rf /",
-			},
-			wantAllowed: false,
+			name:           "filter by exact match",
+			allowedEnvKeys: []string{"PATH", "HOME"},
+			envKeys:        []string{"PATH", "HOME", "USER", "SHELL"},
+			wantCount:      2,
+		},
+		{
+			name:           "filter by wildcard",
+			allowedEnvKeys: []string{"*"},
+			envKeys:        []string{"PATH", "HOME", "USER"},
+			wantCount:      3,
+		},
+		{
+			name:           "filter by prefix wildcard",
+			allowedEnvKeys: []string{"GO*"},
+			envKeys:        []string{"GOPATH", "GOROOT", "PATH", "HOME"},
+			wantCount:      2,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			decision, err := e.Evaluate(tt.policy, tt.req)
-			if err != nil {
-				t.Errorf("Evaluate() error = %v", err)
-				return
-			}
-			if decision.Allowed != tt.wantAllowed {
-				t.Errorf("Evaluate() allowed = %v, want %v (reason: %s)", decision.Allowed, tt.wantAllowed, decision.Reason)
+			result := e.FilterEnvKeys(tt.allowedEnvKeys, tt.envKeys)
+			if len(result) != tt.wantCount {
+				t.Errorf("FilterEnvKeys() returned %d keys, want %d", len(result), tt.wantCount)
 			}
 		})
 	}
 }
 
-func TestValidatePolicy(t *testing.T) {
+func TestValidateTool(t *testing.T) {
 	tests := []struct {
 		name    string
-		policy  *db.Policy
+		tool    *db.Tool
 		wantErr bool
 	}{
 		{
-			name: "valid policy",
-			policy: &db.Policy{
-				AllowedCwdGlobs: []string{"/home/**"},
-				AllowedCmdGlobs: []string{"ls *"},
-				DeniedCmdGlobs:  []string{"rm *"},
-				AllowedEnvKeys:  []string{"PATH", "HOME"},
+			name: "valid tool with bubblewrap",
+			tool: &db.Tool{
+				Name:            "test-tool",
+				Command:         "/usr/bin/test",
+				AllowedArgGlobs: []string{"*"},
+				Sandbox:         db.SandboxTypeBubblewrap,
 			},
 			wantErr: false,
 		},
 		{
-			name: "invalid cwd glob",
-			policy: &db.Policy{
-				AllowedCwdGlobs: []string{"[invalid"},
+			name: "valid tool with none sandbox",
+			tool: &db.Tool{
+				Name:            "test-tool",
+				Command:         "/usr/bin/test",
+				AllowedArgGlobs: []string{},
+				Sandbox:         db.SandboxTypeNone,
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid tool with wasm",
+			tool: &db.Tool{
+				Name:            "wasm-tool",
+				Command:         "module",
+				AllowedArgGlobs: []string{},
+				Sandbox:         db.SandboxTypeWasm,
+				WasmBinary:      "/path/to/module.wasm",
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid wasm without binary",
+			tool: &db.Tool{
+				Name:            "wasm-tool",
+				Command:         "module",
+				AllowedArgGlobs: []string{},
+				Sandbox:         db.SandboxTypeWasm,
+				WasmBinary:      "",
 			},
 			wantErr: true,
 		},
 		{
-			name: "invalid cmd glob",
-			policy: &db.Policy{
-				AllowedCmdGlobs: []string{"[invalid"},
+			name: "invalid arg glob pattern",
+			tool: &db.Tool{
+				Name:            "test-tool",
+				Command:         "/usr/bin/test",
+				AllowedArgGlobs: []string{"[invalid"},
+				Sandbox:         db.SandboxTypeBubblewrap,
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid sandbox type",
+			tool: &db.Tool{
+				Name:            "test-tool",
+				Command:         "/usr/bin/test",
+				AllowedArgGlobs: []string{},
+				Sandbox:         "invalid",
 			},
 			wantErr: true,
 		},
@@ -216,9 +214,42 @@ func TestValidatePolicy(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ValidatePolicy(tt.policy)
+			err := ValidateTool(tt.tool)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("ValidatePolicy() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("ValidateTool() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateAllowedEnvKeys(t *testing.T) {
+	tests := []struct {
+		name     string
+		patterns []string
+		wantErr  bool
+	}{
+		{
+			name:     "valid patterns",
+			patterns: []string{"PATH", "HOME", "GO*"},
+			wantErr:  false,
+		},
+		{
+			name:     "empty patterns",
+			patterns: []string{},
+			wantErr:  false,
+		},
+		{
+			name:     "invalid pattern",
+			patterns: []string{"[invalid"},
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateAllowedEnvKeys(tt.patterns)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateAllowedEnvKeys() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}

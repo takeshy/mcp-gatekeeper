@@ -15,6 +15,8 @@ const (
 	SandboxNone SandboxMode = "none"
 	// SandboxBwrap uses bubblewrap for sandboxing
 	SandboxBwrap SandboxMode = "bwrap"
+	// SandboxWasm uses wazero for WASM sandboxing
+	SandboxWasm SandboxMode = "wasm"
 	// SandboxAuto automatically selects the best available sandbox
 	SandboxAuto SandboxMode = "auto"
 )

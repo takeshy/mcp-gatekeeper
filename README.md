@@ -5,18 +5,22 @@ An MCP (Model Context Protocol) server that **executes shell commands and return
 While providing shell access, MCP Gatekeeper includes flexible security controls to keep your system safe:
 
 - **Directory sandboxing** - All commands are restricted to a specified root directory (chroot-like)
-- **API key-based access control** - Each client gets its own API key with customizable permissions
-- **Glob-based policy rules** - Fine-grained control over which commands and directories are allowed
+- **API key-based access control** - Each client gets its own API key with customizable tools
+- **Tool-based architecture** - Define specific tools per API key with individual sandbox settings
+- **Glob-based argument restrictions** - Fine-grained control over which arguments are allowed per tool
+- **Multiple sandbox modes** - Choose between bubblewrap, WASM, or no sandboxing per tool
 - **Audit logging** - Complete history of all command executions for review
 
 ## Features
 
-- **Shell Command Execution**: Run any shell command and receive stdout, stderr, and exit code
+- **Shell Command Execution**: Run shell commands and receive stdout, stderr, and exit code
 - **Directory Sandbox**: Mandatory `--root-dir` restricts all operations to a specified directory
-- **Bubblewrap Sandboxing**: Optional `bwrap` integration for true process isolation (auto-detected)
-- **Flexible Security**: Configure allowed/denied commands and directories per API key using glob patterns
+- **Per-Tool Sandbox Selection**: Each tool can use `none`, `bubblewrap`, or `wasm` sandbox
+- **Bubblewrap Sandboxing**: `bwrap` integration for true process isolation
+- **WASM Sandboxing**: Run WebAssembly binaries in a secure wazero runtime
+- **Dynamic Tool Registration**: Define custom tools per API key via TUI
 - **Dual Protocol Support**: Both stdio (JSON-RPC for MCP) and HTTP API modes
-- **TUI Admin Tool**: Interactive terminal interface for managing keys, policies, and viewing logs
+- **TUI Admin Tool**: Interactive terminal interface for managing keys, tools, and viewing logs
 - **Audit Logging**: Complete logging of all command requests and execution results
 - **Rate Limiting**: Configurable rate limiting for the HTTP API (default: 500 req/min)
 
@@ -50,19 +54,28 @@ In the TUI:
 3. Enter a name for the key
 4. **Save the generated API key** (it won't be shown again)
 
-### 2. Configure Policy
+### 2. Configure Tools
 
 In the TUI API Keys screen:
-1. Select your API key
-2. Press `e` to edit its policy
-3. Configure allowed/denied patterns (Ctrl+Space for path completion in CWD field)
+1. Select your API key and press Enter to view details
+2. Press `t` to manage tools
+3. Press `n` to create a new tool
 
-Example policy:
-- Allowed CWD Globs: `/home/user/projects/**`
-- Allowed Cmd Globs: `ls *`, `cat *`, `git *`
-- Denied Cmd Globs: `rm -rf *`, `sudo *`
+Example tool configuration:
+- **Name**: `git` (this becomes the MCP tool name)
+- **Description**: `Run git commands`
+- **Command**: `/usr/bin/git`
+- **Allowed Arg Globs**: `status **`, `log **`, `diff **` (one per line)
+- **Sandbox**: `bubblewrap`
 
-### 3. Run the Server
+### 3. Configure Allowed Environment Variables (Optional)
+
+In the API Key detail screen:
+1. Press `v` to edit allowed environment variables
+2. Add patterns like `PATH`, `HOME`, `GO*` (one per line)
+3. Press Ctrl+S to save
+
+### 4. Run the Server
 
 **HTTP Mode:**
 ```bash
@@ -82,14 +95,19 @@ MCP_GATEKEEPER_API_KEY=your-api-key \
   --db=gatekeeper.db
 ```
 
-### 4. Test Execution
+### 5. Test Execution
 
 Using curl (HTTP mode):
 ```bash
-curl -X POST http://localhost:8080/v1/execute \
+# List available tools
+curl http://localhost:8080/v1/tools \
+  -H "Authorization: Bearer your-api-key"
+
+# Call a tool
+curl -X POST http://localhost:8080/v1/tools/git \
   -H "Authorization: Bearer your-api-key" \
   -H "Content-Type: application/json" \
-  -d '{"cwd": "/home/user/projects", "cmd": "ls", "args": ["-la"]}'
+  -d '{"cwd": "/home/user/projects", "args": ["status", "--short"]}'
 ```
 
 ## Configuration
@@ -103,7 +121,6 @@ curl -X POST http://localhost:8080/v1/execute \
 | `--db` | `gatekeeper.db` | SQLite database path |
 | `--addr` | `:8080` | HTTP server address (for http mode) |
 | `--rate-limit` | `500` | Rate limit per API key per minute (for http mode) |
-| `--sandbox` | `auto` | Sandbox mode: `auto`, `bwrap`, or `none` |
 | `--api-key` | - | API key for stdio mode (or use `MCP_GATEKEEPER_API_KEY` env var) |
 
 ### Directory Sandbox (--root-dir)
@@ -119,15 +136,26 @@ The `--root-dir` option is **required** and creates a chroot-like sandbox:
 - Symlinks are resolved to prevent escape attempts
 - The server refuses to start without this option
 
-### Sandbox Mode (--sandbox)
+### Tool Configuration
 
-The `--sandbox` option controls process isolation:
+Each tool has the following settings:
+
+| Field | Description |
+|-------|-------------|
+| `name` | MCP tool name (unique per API key) |
+| `description` | Tool description shown to MCP clients |
+| `command` | Absolute path to executable (e.g., `/usr/bin/git`) |
+| `allowed_arg_globs` | Glob patterns for allowed arguments |
+| `sandbox` | Sandbox mode: `none`, `bubblewrap`, or `wasm` |
+| `wasm_binary` | Path to WASM binary (required for `wasm` sandbox) |
+
+### Sandbox Modes
 
 | Mode | Description |
 |------|-------------|
-| `auto` | Automatically use `bwrap` if available, fall back to path validation |
-| `bwrap` | Require bubblewrap sandboxing (warns and falls back if not installed) |
-| `none` | Use only path validation (no process isolation) |
+| `none` | No process isolation, only path validation |
+| `bubblewrap` | Full namespace isolation using `bwrap` |
+| `wasm` | Run WebAssembly binaries in wazero runtime |
 
 **Why bubblewrap?**
 
@@ -152,14 +180,84 @@ sudo dnf install bubblewrap
 sudo pacman -S bubblewrap
 ```
 
-The server automatically detects if `bwrap` is available and uses it when `--sandbox=auto` (default).
+**WASM Sandbox:**
 
-### Policy Precedence
+For maximum isolation, you can run WebAssembly binaries:
+- Compiled with WASI support
+- Runs in wazero runtime (pure Go, no CGO)
+- Filesystem access restricted to root directory
+- No network access
 
-Two modes are available:
+**Creating WASM binaries:**
 
-- `deny_overrides` (default): Deny rules are checked first; if a command is denied, it's blocked even if it matches an allow rule
-- `allow_overrides`: Allow rules take precedence; if a command matches an allow rule, it's permitted even if it matches a deny rule
+You can compile programs to WASM using various languages. Here are some examples:
+
+*Using Rust:*
+```bash
+# Install the WASI target
+rustup target add wasm32-wasip1
+
+# Create a new project
+cargo new --bin my-tool
+cd my-tool
+
+# Build for WASI
+cargo build --release --target wasm32-wasip1
+
+# The binary will be at target/wasm32-wasip1/release/my-tool.wasm
+```
+
+*Using Go:*
+```bash
+# Build for WASI
+GOOS=wasip1 GOARCH=wasm go build -o my-tool.wasm main.go
+```
+
+*Using C/C++ (with WASI SDK):*
+```bash
+# Install WASI SDK from https://github.com/WebAssembly/wasi-sdk
+export WASI_SDK_PATH=/opt/wasi-sdk
+
+# Compile
+$WASI_SDK_PATH/bin/clang -o my-tool.wasm my-tool.c
+```
+
+**Using scripting language runtimes in WASM:**
+
+You can run scripts in sandboxed interpreters compiled to WASM:
+
+*Ruby (ruby.wasm):*
+```bash
+# Download from https://github.com/ruby/ruby.wasm/releases
+# Choose the latest ruby-*-wasm32-unknown-wasip1-full.tar.gz
+tar xzf ruby-*-wasm32-unknown-wasip1-full.tar.gz
+# Use: ruby-*-wasm32-unknown-wasip1-full/usr/local/bin/ruby
+```
+
+*Python (python.wasm):*
+```bash
+# Download from https://github.com/nickstenning/python-wasm/releases or build from source
+# Use: python.wasm
+```
+
+*Node.js is not available as WASI, but you can use QuickJS:*
+```bash
+# Download from https://nickstenning.github.io/verless-quickjs-wasm/
+# Or build from https://github.com/nickstenning/verless-quickjs-wasm
+curl -LO https://nickstenning.github.io/verless-quickjs-wasm/quickjs.wasm
+# Use: quickjs.wasm
+```
+
+**Configuring a WASM tool:**
+
+In the TUI, create a tool with:
+- **Name**: `my-tool`
+- **Description**: `My WASM tool`
+- **Command**: `my-tool` (any value, not used for WASM)
+- **Sandbox**: `wasm`
+- **WASM Binary**: `/path/to/my-tool.wasm`
+
+The WASM binary receives arguments via WASI's `args_get` and can access files within the root directory.
 
 ### Glob Patterns
 
@@ -173,19 +271,46 @@ The following glob syntax is supported:
 | `[abc]` | Matches any character in the set |
 | `{a,b}` | Matches either `a` or `b` |
 
-Examples:
-- `/home/**` - All paths under /home
-- `/usr/bin/*` - Any command in /usr/bin
-- `git *` - Any git command
-- `rm -rf *` - Block recursive force remove
+Examples for `allowed_arg_globs`:
+- `status **` - Allow `status` with any arguments
+- `log --oneline **` - Allow `log --oneline` with any path
+- `diff **` - Allow `diff` with any arguments
+- Empty (no patterns) - Allow all arguments
 
 ## API Reference
 
 ### HTTP API
 
-#### POST /v1/execute
+#### GET /v1/tools
 
-Execute a command.
+List available tools for the authenticated API key.
+
+**Headers:**
+- `Authorization: Bearer <api-key>` (required)
+
+**Response:**
+```json
+{
+  "tools": [
+    {
+      "name": "git",
+      "description": "Run git commands",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cwd": {"type": "string", "description": "Working directory"},
+          "args": {"type": "array", "items": {"type": "string"}, "description": "Command arguments"}
+        },
+        "required": ["cwd"]
+      }
+    }
+  ]
+}
+```
+
+#### POST /v1/tools/{toolName}
+
+Execute a tool.
 
 **Headers:**
 - `Authorization: Bearer <api-key>` (required)
@@ -194,7 +319,6 @@ Execute a command.
 ```json
 {
   "cwd": "/path/to/directory",
-  "cmd": "command",
   "args": ["arg1", "arg2"]
 }
 ```
@@ -212,19 +336,15 @@ Execute a command.
 **Error Response:**
 ```json
 {
-  "error": "command denied by policy: ..."
+  "error": "arguments not in allowed patterns"
 }
 ```
 
 ### MCP Protocol (stdio)
 
-The server implements the MCP protocol with the following tool:
+The server dynamically generates MCP tools from the database. Each tool registered for the API key becomes available as an MCP tool.
 
-#### execute
-
-Execute a shell command.
-
-**Input Schema:**
+**Tool Input Schema:**
 ```json
 {
   "type": "object",
@@ -233,17 +353,13 @@ Execute a shell command.
       "type": "string",
       "description": "Working directory for the command"
     },
-    "cmd": {
-      "type": "string",
-      "description": "Command to execute"
-    },
     "args": {
       "type": "array",
       "items": { "type": "string" },
       "description": "Command arguments"
     }
   },
-  "required": ["cwd", "cmd"]
+  "required": ["cwd"]
 }
 ```
 
@@ -252,9 +368,10 @@ Execute a shell command.
 The admin tool provides:
 
 - **API Keys**: Create, view, revoke API keys
-- **Policies**: Configure allowed/denied patterns per key (with path completion)
+- **Tools**: Configure tools per API key (command, args, sandbox)
+- **Environment Variables**: Configure allowed environment variables per key
 - **Audit Logs**: Browse and inspect execution history
-- **Test Execute**: Test commands against policies
+- **Test Execute**: Test tool execution with real commands
 
 ### Keyboard Shortcuts
 
@@ -266,17 +383,18 @@ The admin tool provides:
 | `n` | New item |
 | `e` | Edit |
 | `d` | Delete/Revoke |
+| `t` | Manage tools (in API Key detail) |
+| `v` | Edit env vars (in API Key detail) |
 | `q` | Quit |
 | `Tab` | Next field |
-| `Ctrl+Space` | Path completion (in CWD field) |
 | `Ctrl+S` | Save |
 
 ## Security Considerations
 
 1. **Directory Sandbox**: All commands are restricted to `--root-dir`; paths outside are rejected
-2. **Bubblewrap Isolation**: When available, commands run in isolated namespaces preventing filesystem escape
-3. **API Key Storage**: API keys are hashed with bcrypt; the plaintext is only shown once at creation
-4. **Policy Design**: Start with restrictive policies and add allowances as needed
+2. **Per-Tool Sandbox**: Each tool can specify its isolation level (none, bubblewrap, wasm)
+3. **Argument Restrictions**: Use `allowed_arg_globs` to limit what arguments can be passed
+4. **API Key Storage**: API keys are hashed with bcrypt; the plaintext is only shown once at creation
 5. **Audit Logs**: All requests are logged regardless of the decision (stored in plain text)
 6. **Rate Limiting**: HTTP API includes configurable per-key rate limiting
 7. **Symlink Resolution**: Symlinks are resolved to prevent sandbox escape
@@ -285,8 +403,9 @@ The admin tool provides:
 
 | Sandbox Mode | Protection Level | Notes |
 |--------------|------------------|-------|
-| `bwrap` | High | Full namespace isolation, recommended for production |
-| `none` | Basic | Path validation only, scripts can bypass via absolute paths |
+| `wasm` | Highest | WASI sandbox, no system calls |
+| `bubblewrap` | High | Full namespace isolation, recommended for native binaries |
+| `none` | Basic | Path validation only, use for trusted commands |
 
 ## Development
 
@@ -305,7 +424,7 @@ mcp-gatekeeper/
 │   └── admin/           # TUI admin tool
 ├── internal/
 │   ├── auth/            # API key authentication
-│   ├── policy/          # Policy evaluation engine
+│   ├── policy/          # Argument evaluation engine
 │   ├── executor/        # Command execution engine
 │   ├── db/              # Database access layer
 │   ├── mcp/             # MCP protocol implementation

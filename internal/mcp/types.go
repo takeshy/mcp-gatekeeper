@@ -154,10 +154,9 @@ type Content struct {
 	Text string `json:"text,omitempty"`
 }
 
-// ExecuteParams represents params for the execute tool
-type ExecuteParams struct {
+// ToolCallArguments represents the arguments for tool calls
+type ToolCallArguments struct {
 	Cwd  string   `json:"cwd"`
-	Cmd  string   `json:"cmd"`
 	Args []string `json:"args,omitempty"`
 }
 

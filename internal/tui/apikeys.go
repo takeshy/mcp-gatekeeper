@@ -6,12 +6,14 @@ import (
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/takeshy/mcp-gatekeeper/internal/auth"
 	"github.com/takeshy/mcp-gatekeeper/internal/db"
+	"github.com/takeshy/mcp-gatekeeper/internal/policy"
 )
 
 // APIKeyItem represents an API key in the list
@@ -105,7 +107,7 @@ func (m *APIKeyListModel) View() string {
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
 		m.list.View(),
-		helpStyle.Render("\n  n: new • d: delete • e: edit policy • enter: details • esc: back"),
+		helpStyle.Render("\n  n: new • d: revoke • t: tools • v: env vars • enter: details • esc: back"),
 	)
 }
 
@@ -162,13 +164,6 @@ func (m *APIKeyCreateModel) Update(msg tea.Msg) (*APIKeyCreateModel, tea.Cmd) {
 					return m, nil
 				}
 
-				// Create default policy
-				_, err = m.db.CreatePolicy(keyRecord.ID, db.PrecedenceDenyOverrides)
-				if err != nil {
-					m.err = err
-					return m, nil
-				}
-
 				m.created = true
 				m.apiKey = apiKey
 				m.keyRecord = keyRecord
@@ -196,7 +191,7 @@ func (m *APIKeyCreateModel) View() string {
 		sb.WriteString(fmt.Sprintf("ID: %d\n\n", m.keyRecord.ID))
 		sb.WriteString(boxStyle.Render(fmt.Sprintf("API Key (save this, it won't be shown again):\n\n%s", m.apiKey)))
 		sb.WriteString("\n\n")
-		sb.WriteString(helpStyle.Render("Press esc to go back"))
+		sb.WriteString(helpStyle.Render("Press esc to go back. Then add tools with 't' key."))
 	} else {
 		sb.WriteString("Key Name:\n")
 		sb.WriteString(m.nameInput.View())
@@ -215,10 +210,10 @@ func (m *APIKeyCreateModel) View() string {
 
 // APIKeyDetailModel handles API key detail view
 type APIKeyDetailModel struct {
-	db     *db.DB
-	apiKey *db.APIKey
-	policy *db.Policy
-	err    error
+	db         *db.DB
+	apiKey     *db.APIKey
+	toolsCount int
+	err        error
 }
 
 // NewAPIKeyDetailModel creates a new API key detail model
@@ -231,26 +226,26 @@ func NewAPIKeyDetailModel(database *db.DB, apiKey *db.APIKey) *APIKeyDetailModel
 
 // Init initializes the model
 func (m *APIKeyDetailModel) Init() tea.Cmd {
-	return m.loadPolicy
+	return m.loadToolsCount
 }
 
-func (m *APIKeyDetailModel) loadPolicy() tea.Msg {
-	policy, err := m.db.GetPolicyByAPIKeyID(m.apiKey.ID)
+func (m *APIKeyDetailModel) loadToolsCount() tea.Msg {
+	tools, err := m.db.ListToolsByAPIKeyID(m.apiKey.ID)
 	if err != nil {
 		return errMsg{err}
 	}
-	return policyMsg{policy}
+	return toolsCountMsg{len(tools)}
 }
 
-type policyMsg struct {
-	policy *db.Policy
+type toolsCountMsg struct {
+	count int
 }
 
 // Update handles messages
 func (m *APIKeyDetailModel) Update(msg tea.Msg) (*APIKeyDetailModel, tea.Cmd) {
 	switch msg := msg.(type) {
-	case policyMsg:
-		m.policy = msg.policy
+	case toolsCountMsg:
+		m.toolsCount = msg.count
 		return m, nil
 	case errMsg:
 		m.err = msg.err
@@ -277,15 +272,14 @@ func (m *APIKeyDetailModel) View() string {
 		sb.WriteString(fmt.Sprintf("Revoked At: %s\n", m.apiKey.RevokedAt.Time.Format("2006-01-02 15:04:05")))
 	}
 
-	if m.policy != nil {
-		sb.WriteString("\n")
-		sb.WriteString(titleStyle.Render("Policy"))
-		sb.WriteString("\n\n")
-		sb.WriteString(fmt.Sprintf("Precedence: %s\n", m.policy.Precedence))
-		sb.WriteString(fmt.Sprintf("Allowed CWD Globs: %v\n", m.policy.AllowedCwdGlobs))
-		sb.WriteString(fmt.Sprintf("Allowed Cmd Globs: %v\n", m.policy.AllowedCmdGlobs))
-		sb.WriteString(fmt.Sprintf("Denied Cmd Globs:  %v\n", m.policy.DeniedCmdGlobs))
-		sb.WriteString(fmt.Sprintf("Allowed Env Keys:  %v\n", m.policy.AllowedEnvKeys))
+	sb.WriteString("\n")
+	sb.WriteString(titleStyle.Render("Configuration"))
+	sb.WriteString("\n\n")
+	sb.WriteString(fmt.Sprintf("Tools:            %d configured\n", m.toolsCount))
+	if len(m.apiKey.AllowedEnvKeys) == 0 {
+		sb.WriteString("Allowed Env Keys: (no restrictions - all env vars allowed)\n")
+	} else {
+		sb.WriteString(fmt.Sprintf("Allowed Env Keys: %v\n", m.apiKey.AllowedEnvKeys))
 	}
 
 	sb.WriteString("\n")
@@ -294,7 +288,109 @@ func (m *APIKeyDetailModel) View() string {
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString(helpStyle.Render("\ne: edit policy • r: revoke • esc: back"))
+	sb.WriteString(helpStyle.Render("\nt: manage tools • v: edit env vars • r: revoke • esc: back"))
+
+	return sb.String()
+}
+
+// EnvKeysEditModel handles editing allowed environment keys
+type EnvKeysEditModel struct {
+	db             *db.DB
+	apiKey         *db.APIKey
+	input          textarea.Model
+	err            error
+	saved          bool
+	showCompletion bool
+}
+
+// NewEnvKeysEditModel creates a new env keys edit model
+func NewEnvKeysEditModel(database *db.DB, apiKey *db.APIKey) *EnvKeysEditModel {
+	ta := textarea.New()
+	ta.Placeholder = "Enter allowed env key patterns, one per line (e.g., PATH, HOME, USER)"
+	ta.SetValue(strings.Join(apiKey.AllowedEnvKeys, "\n"))
+	ta.CharLimit = 0
+	ta.SetWidth(60)
+	ta.SetHeight(10)
+	ta.Focus()
+
+	return &EnvKeysEditModel{
+		db:     database,
+		apiKey: apiKey,
+		input:  ta,
+	}
+}
+
+// Init initializes the model
+func (m *EnvKeysEditModel) Init() tea.Cmd {
+	return textarea.Blink
+}
+
+// Update handles messages
+func (m *EnvKeysEditModel) Update(msg tea.Msg) (*EnvKeysEditModel, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+s":
+			return m, m.save
+		}
+	case envKeysSavedMsg:
+		m.saved = true
+		return m, nil
+	case errMsg:
+		m.err = msg.err
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
+}
+
+func (m *EnvKeysEditModel) save() tea.Msg {
+	keys := parseLines(m.input.Value())
+
+	// Validate patterns
+	if err := policy.ValidateAllowedEnvKeys(keys); err != nil {
+		return errMsg{err}
+	}
+
+	// Save
+	if err := m.db.UpdateAPIKeyAllowedEnvKeys(m.apiKey.ID, keys); err != nil {
+		return errMsg{err}
+	}
+
+	// Update local copy
+	m.apiKey.AllowedEnvKeys = keys
+
+	return envKeysSavedMsg{}
+}
+
+type envKeysSavedMsg struct{}
+
+// View renders the model
+func (m *EnvKeysEditModel) View() string {
+	var sb strings.Builder
+
+	sb.WriteString(titleStyle.Render("Edit Allowed Environment Keys"))
+	sb.WriteString("\n\n")
+
+	if m.saved {
+		sb.WriteString(successStyle.Render("Environment Keys Updated Successfully!"))
+		sb.WriteString("\n\n")
+		sb.WriteString(helpStyle.Render("Press esc to go back"))
+	} else {
+		sb.WriteString("Allowed patterns (one per line):\n")
+		sb.WriteString("Empty = all env vars allowed\n\n")
+		sb.WriteString(m.input.View())
+		sb.WriteString("\n\n")
+
+		if m.err != nil {
+			sb.WriteString(errorStyle.Render(fmt.Sprintf("Error: %v", m.err)))
+			sb.WriteString("\n\n")
+		}
+
+		sb.WriteString(helpStyle.Render("ctrl+s: save • esc: cancel"))
+	}
 
 	return sb.String()
 }
@@ -329,14 +425,19 @@ func (a *App) updateAPIKeys(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return a, a.apiKeyList.loadAPIKeys
 			}
 		}
-		if key.Matches(msg, keys.Edit) {
+		if key.Matches(msg, keys.Test) { // 't' for tools
 			if selected := a.apiKeyList.SelectedKey(); selected != nil {
-				policy, _ := a.db.GetPolicyByAPIKeyID(selected.ID)
-				if policy != nil {
-					a.policyEdit = NewPolicyEditModel(a.db, policy)
-					a.pushScreen(ScreenPolicyEdit)
-					return a, a.policyEdit.Init()
-				}
+				a.selectedAPIKey = selected
+				a.toolList = NewToolListModel(a.db, selected.ID, a.width, a.height)
+				a.pushScreen(ScreenToolList)
+				return a, a.toolList.Init()
+			}
+		}
+		if msg.String() == "v" { // 'v' for env vars
+			if selected := a.apiKeyList.SelectedKey(); selected != nil {
+				a.envKeysEdit = NewEnvKeysEditModel(a.db, selected)
+				a.pushScreen(ScreenEnvKeysEdit)
+				return a, a.envKeysEdit.Init()
 			}
 		}
 	}
@@ -367,11 +468,24 @@ func (a *App) updateAPIKeyDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.popScreen()
 			return a, nil
 		}
-		if key.Matches(msg, keys.Edit) {
-			if a.apiKeyDetail.policy != nil {
-				a.policyEdit = NewPolicyEditModel(a.db, a.apiKeyDetail.policy)
-				a.pushScreen(ScreenPolicyEdit)
-				return a, a.policyEdit.Init()
+		if key.Matches(msg, keys.Test) { // 't' for tools
+			a.selectedAPIKey = a.apiKeyDetail.apiKey
+			a.toolList = NewToolListModel(a.db, a.apiKeyDetail.apiKey.ID, a.width, a.height)
+			a.pushScreen(ScreenToolList)
+			return a, a.toolList.Init()
+		}
+		if msg.String() == "v" { // 'v' for env vars
+			a.envKeysEdit = NewEnvKeysEditModel(a.db, a.apiKeyDetail.apiKey)
+			a.pushScreen(ScreenEnvKeysEdit)
+			return a, a.envKeysEdit.Init()
+		}
+		if msg.String() == "r" { // 'r' for revoke
+			if err := a.db.RevokeAPIKey(a.apiKeyDetail.apiKey.ID); err != nil {
+				a.err = err
+			} else {
+				a.message = "API key revoked"
+				a.popScreen()
+				return a, a.apiKeyList.loadAPIKeys
 			}
 		}
 	}
@@ -407,4 +521,15 @@ func (a *App) viewAPIKeyDetail() string {
 		return "Loading..."
 	}
 	return a.apiKeyDetail.View()
+}
+
+func parseLines(s string) []string {
+	var result []string
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			result = append(result, line)
+		}
+	}
+	return result
 }

@@ -2,22 +2,26 @@
 
 **シェルコマンドを実行し、その結果を返す**MCP（Model Context Protocol）サーバーです。ClaudeなどのAIアシスタントがシステム上でコマンドを実行し、stdout、stderr、終了コードを受け取ることができます。
 
-フルシェルアクセスを提供しながらも、システムを安全に保つための柔軟なセキュリティ制御を備えています：
+シェルアクセスを提供しながらも、システムを安全に保つための柔軟なセキュリティ制御を備えています：
 
 - **ディレクトリサンドボックス** - すべてのコマンドは指定されたルートディレクトリに制限（chroot風）
-- **APIキーベースのアクセス制御** - 各クライアントに独自のAPIキーとカスタマイズ可能な権限を付与
-- **Globベースのポリシールール** - 許可するコマンドとディレクトリを細かく制御
+- **APIキーベースのアクセス制御** - 各クライアントに独自のAPIキーとカスタマイズ可能なツールを付与
+- **ツールベースアーキテクチャ** - APIキーごとに個別のサンドボックス設定を持つツールを定義
+- **Globベースの引数制限** - ツールごとに許可する引数を細かく制御
+- **複数のサンドボックスモード** - ツールごとにbubblewrap、WASM、またはサンドボックスなしを選択
 - **監査ログ** - すべてのコマンド実行履歴を確認可能
 
 ## 機能
 
-- **シェルコマンド実行**: 任意のシェルコマンドを実行し、stdout、stderr、終了コードを取得
+- **シェルコマンド実行**: シェルコマンドを実行し、stdout、stderr、終了コードを取得
 - **ディレクトリサンドボックス**: 必須の`--root-dir`オプションにより、すべての操作を指定ディレクトリに制限
-- **Bubblewrapサンドボックス**: オプションの`bwrap`統合による真のプロセス分離（自動検出）
-- **柔軟なセキュリティ**: APIキーごとにglobパターンで許可/拒否するコマンドとディレクトリを設定
+- **ツールごとのサンドボックス選択**: 各ツールは`none`、`bubblewrap`、`wasm`のサンドボックスを使用可能
+- **Bubblewrapサンドボックス**: `bwrap`統合による真のプロセス分離
+- **WASMサンドボックス**: 安全なwazeroランタイムでWebAssemblyバイナリを実行
+- **動的ツール登録**: TUIを通じてAPIキーごとにカスタムツールを定義
 - **デュアルプロトコル対応**: stdio（MCP用JSON-RPC）とHTTP APIの両モードをサポート
-- **TUI管理ツール**: キー、ポリシー、ログを管理するインタラクティブなターミナルインターフェース
-- **監査ログ**: すべてのコマンドリクエストと実行結果の完全なログ記録（平文で保存）
+- **TUI管理ツール**: キー、ツール、ログを管理するインタラクティブなターミナルインターフェース
+- **監査ログ**: すべてのコマンドリクエストと実行結果の完全なログ記録
 - **レート制限**: HTTP API用の設定可能なレート制限（デフォルト: 500リクエスト/分）
 
 ## インストール
@@ -50,19 +54,28 @@ TUIで：
 3. キーの名前を入力
 4. **生成されたAPIキーを保存**（再表示されません）
 
-### 2. ポリシーの設定
+### 2. ツールの設定
 
 TUIのAPI Keys画面で：
-1. APIキーを選択
-2. `e`キーでポリシーを編集
-3. 許可/拒否パターンを設定（CWDフィールドでCtrl+Spaceでパス補完可能）
+1. APIキーを選択してEnterで詳細を表示
+2. `t`キーでツール管理画面へ
+3. `n`キーで新しいツールを作成
 
-ポリシー例：
-- 許可するCWD Glob: `/home/user/projects/**`
-- 許可するCmd Glob: `ls *`, `cat *`, `git *`
-- 拒否するCmd Glob: `rm -rf *`, `sudo *`
+ツール設定例：
+- **Name**: `git`（これがMCPツール名になります）
+- **Description**: `Run git commands`
+- **Command**: `/usr/bin/git`
+- **Allowed Arg Globs**: `status **`, `log **`, `diff **`（1行に1パターン）
+- **Sandbox**: `bubblewrap`
 
-### 3. サーバーの起動
+### 3. 許可する環境変数の設定（オプション）
+
+APIキー詳細画面で：
+1. `v`キーで環境変数の編集へ
+2. `PATH`、`HOME`、`GO*`などのパターンを追加（1行に1パターン）
+3. Ctrl+Sで保存
+
+### 4. サーバーの起動
 
 **HTTPモード：**
 ```bash
@@ -82,14 +95,19 @@ MCP_GATEKEEPER_API_KEY=your-api-key \
   --db=gatekeeper.db
 ```
 
-### 4. 実行テスト
+### 5. 実行テスト
 
 curlを使用（HTTPモード）：
 ```bash
-curl -X POST http://localhost:8080/v1/execute \
+# 利用可能なツールを一覧表示
+curl http://localhost:8080/v1/tools \
+  -H "Authorization: Bearer your-api-key"
+
+# ツールを呼び出し
+curl -X POST http://localhost:8080/v1/tools/git \
   -H "Authorization: Bearer your-api-key" \
   -H "Content-Type: application/json" \
-  -d '{"cwd": "/home/user/projects", "cmd": "ls", "args": ["-la"]}'
+  -d '{"cwd": "/home/user/projects", "args": ["status", "--short"]}'
 ```
 
 ## 設定
@@ -103,7 +121,6 @@ curl -X POST http://localhost:8080/v1/execute \
 | `--db` | `gatekeeper.db` | SQLiteデータベースパス |
 | `--addr` | `:8080` | HTTPサーバーアドレス（httpモード用） |
 | `--rate-limit` | `500` | APIキーごとの分間レート制限（httpモード用） |
-| `--sandbox` | `auto` | サンドボックスモード: `auto`、`bwrap`、`none` |
 | `--api-key` | - | stdioモード用のAPIキー（または`MCP_GATEKEEPER_API_KEY`環境変数） |
 
 ### ディレクトリサンドボックス (--root-dir)
@@ -119,15 +136,26 @@ curl -X POST http://localhost:8080/v1/execute \
 - シンボリックリンクは脱出を防ぐために解決されます
 - このオプションなしでサーバーは起動しません
 
-### サンドボックスモード (--sandbox)
+### ツール設定
 
-`--sandbox`オプションはプロセス分離を制御します：
+各ツールには以下の設定があります：
+
+| フィールド | 説明 |
+|-----------|------|
+| `name` | MCPツール名（APIキーごとにユニーク） |
+| `description` | MCPクライアントに表示されるツールの説明 |
+| `command` | 実行ファイルの絶対パス（例: `/usr/bin/git`） |
+| `allowed_arg_globs` | 許可する引数のGlobパターン |
+| `sandbox` | サンドボックスモード: `none`、`bubblewrap`、`wasm` |
+| `wasm_binary` | WASMバイナリのパス（`wasm`サンドボックス時に必須） |
+
+### サンドボックスモード
 
 | モード | 説明 |
 |--------|------|
-| `auto` | `bwrap`が利用可能なら使用、なければパス検証にフォールバック |
-| `bwrap` | bubblewrapサンドボックスを要求（未インストール時は警告を出してフォールバック） |
-| `none` | パス検証のみ使用（プロセス分離なし） |
+| `none` | プロセス分離なし、パス検証のみ |
+| `bubblewrap` | `bwrap`を使用した完全な名前空間分離 |
+| `wasm` | wazeroランタイムでWebAssemblyバイナリを実行 |
 
 **なぜbubblewrapが必要か？**
 
@@ -152,14 +180,84 @@ sudo dnf install bubblewrap
 sudo pacman -S bubblewrap
 ```
 
-`--sandbox=auto`（デフォルト）の場合、サーバーは自動的に`bwrap`の可用性を検出して使用します。
+**WASMサンドボックス：**
 
-### ポリシーの優先順位
+最大限の分離のために、WebAssemblyバイナリを実行できます：
+- WASIサポートでコンパイル
+- wazeroランタイムで実行（純粋なGo、CGO不要）
+- ファイルシステムアクセスはルートディレクトリに制限
+- ネットワークアクセスなし
 
-2つのモードが利用可能：
+**WASMバイナリの作成：**
 
-- `deny_overrides`（デフォルト）: 拒否ルールが先にチェックされ、コマンドが拒否された場合は許可ルールにマッチしてもブロック
-- `allow_overrides`: 許可ルールが優先され、コマンドが許可ルールにマッチすれば拒否ルールにマッチしても実行許可
+様々な言語でWASMにコンパイルできます：
+
+*Rustを使用：*
+```bash
+# WASIターゲットをインストール
+rustup target add wasm32-wasip1
+
+# 新しいプロジェクトを作成
+cargo new --bin my-tool
+cd my-tool
+
+# WASI用にビルド
+cargo build --release --target wasm32-wasip1
+
+# バイナリは target/wasm32-wasip1/release/my-tool.wasm に生成される
+```
+
+*Goを使用：*
+```bash
+# WASI用にビルド
+GOOS=wasip1 GOARCH=wasm go build -o my-tool.wasm main.go
+```
+
+*C/C++を使用（WASI SDK）：*
+```bash
+# WASI SDKをインストール https://github.com/WebAssembly/wasi-sdk
+export WASI_SDK_PATH=/opt/wasi-sdk
+
+# コンパイル
+$WASI_SDK_PATH/bin/clang -o my-tool.wasm my-tool.c
+```
+
+**スクリプト言語のWASMランタイム：**
+
+WASMにコンパイルされたインタプリタでスクリプトを実行できます：
+
+*Ruby (ruby.wasm)：*
+```bash
+# https://github.com/ruby/ruby.wasm/releases からダウンロード
+# 最新の ruby-*-wasm32-unknown-wasip1-full.tar.gz を選択
+tar xzf ruby-*-wasm32-unknown-wasip1-full.tar.gz
+# 使用: ruby-*-wasm32-unknown-wasip1-full/usr/local/bin/ruby
+```
+
+*Python (python.wasm)：*
+```bash
+# https://github.com/nickstenning/python-wasm/releases からダウンロード、またはソースからビルド
+# 使用: python.wasm
+```
+
+*Node.jsはWASIで利用不可、代わりにQuickJSを使用：*
+```bash
+# https://nickstenning.github.io/verless-quickjs-wasm/ からダウンロード
+# または https://github.com/nickstenning/verless-quickjs-wasm からビルド
+curl -LO https://nickstenning.github.io/verless-quickjs-wasm/quickjs.wasm
+# 使用: quickjs.wasm
+```
+
+**WASMツールの設定：**
+
+TUIでツールを作成する際：
+- **Name**: `my-tool`
+- **Description**: `My WASM tool`
+- **Command**: `my-tool`（任意の値、WASMでは使用されない）
+- **Sandbox**: `wasm`
+- **WASM Binary**: `/path/to/my-tool.wasm`
+
+WASMバイナリはWASIの`args_get`経由で引数を受け取り、ルートディレクトリ内のファイルにアクセスできます。
 
 ### Globパターン
 
@@ -173,19 +271,46 @@ sudo pacman -S bubblewrap
 | `[abc]` | セット内の任意の文字にマッチ |
 | `{a,b}` | `a`または`b`にマッチ |
 
-例：
-- `/home/**` - /home配下のすべてのパス
-- `/usr/bin/*` - /usr/bin内の任意のコマンド
-- `git *` - 任意のgitコマンド
-- `rm -rf *` - 再帰的強制削除をブロック
+`allowed_arg_globs`の例：
+- `status **` - `status`と任意の引数を許可
+- `log --oneline **` - `log --oneline`と任意のパスを許可
+- `diff **` - `diff`と任意の引数を許可
+- 空（パターンなし）- すべての引数を許可
 
 ## APIリファレンス
 
 ### HTTP API
 
-#### POST /v1/execute
+#### GET /v1/tools
 
-コマンドを実行します。
+認証されたAPIキーで利用可能なツールを一覧表示します。
+
+**ヘッダー：**
+- `Authorization: Bearer <api-key>`（必須）
+
+**レスポンス：**
+```json
+{
+  "tools": [
+    {
+      "name": "git",
+      "description": "Run git commands",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cwd": {"type": "string", "description": "作業ディレクトリ"},
+          "args": {"type": "array", "items": {"type": "string"}, "description": "コマンド引数"}
+        },
+        "required": ["cwd"]
+      }
+    }
+  ]
+}
+```
+
+#### POST /v1/tools/{toolName}
+
+ツールを実行します。
 
 **ヘッダー：**
 - `Authorization: Bearer <api-key>`（必須）
@@ -194,7 +319,6 @@ sudo pacman -S bubblewrap
 ```json
 {
   "cwd": "/path/to/directory",
-  "cmd": "command",
   "args": ["arg1", "arg2"]
 }
 ```
@@ -212,19 +336,15 @@ sudo pacman -S bubblewrap
 **エラーレスポンス：**
 ```json
 {
-  "error": "command denied by policy: ..."
+  "error": "arguments not in allowed patterns"
 }
 ```
 
 ### MCPプロトコル（stdio）
 
-サーバーは以下のツールを持つMCPプロトコルを実装：
+サーバーはデータベースからMCPツールを動的に生成します。APIキーに登録された各ツールがMCPツールとして利用可能になります。
 
-#### execute
-
-シェルコマンドを実行します。
-
-**入力スキーマ：**
+**ツール入力スキーマ：**
 ```json
 {
   "type": "object",
@@ -233,17 +353,13 @@ sudo pacman -S bubblewrap
       "type": "string",
       "description": "コマンドの作業ディレクトリ"
     },
-    "cmd": {
-      "type": "string",
-      "description": "実行するコマンド"
-    },
     "args": {
       "type": "array",
       "items": { "type": "string" },
       "description": "コマンド引数"
     }
   },
-  "required": ["cwd", "cmd"]
+  "required": ["cwd"]
 }
 ```
 
@@ -252,9 +368,10 @@ sudo pacman -S bubblewrap
 管理ツールの機能：
 
 - **API Keys**: APIキーの作成、表示、無効化
-- **Policies**: キーごとの許可/拒否パターンの設定（パス補完機能付き）
+- **Tools**: APIキーごとのツール設定（コマンド、引数、サンドボックス）
+- **Environment Variables**: キーごとの許可する環境変数の設定
 - **Audit Logs**: 実行履歴の閲覧と検査
-- **Test Execute**: ポリシーに対するコマンドのテスト
+- **Test Execute**: 実際のコマンドでツール実行をテスト
 
 ### キーボードショートカット
 
@@ -266,17 +383,18 @@ sudo pacman -S bubblewrap
 | `n` | 新規作成 |
 | `e` | 編集 |
 | `d` | 削除/無効化 |
+| `t` | ツール管理（APIキー詳細画面） |
+| `v` | 環境変数編集（APIキー詳細画面） |
 | `q` | 終了 |
 | `Tab` | 次のフィールド |
-| `Ctrl+Space` | パス補完（CWDフィールド） |
 | `Ctrl+S` | 保存 |
 
 ## セキュリティ上の考慮事項
 
 1. **ディレクトリサンドボックス**: すべてのコマンドは`--root-dir`に制限され、外部のパスは拒否されます
-2. **Bubblewrap分離**: 利用可能な場合、コマンドは分離された名前空間で実行されファイルシステムの脱出を防止
-3. **APIキーの保存**: APIキーはbcryptでハッシュ化され、平文は作成時に一度だけ表示
-4. **ポリシー設計**: 制限的なポリシーから始めて、必要に応じて許可を追加
+2. **ツールごとのサンドボックス**: 各ツールは分離レベルを指定可能（none、bubblewrap、wasm）
+3. **引数制限**: `allowed_arg_globs`で渡せる引数を制限
+4. **APIキーの保存**: APIキーはbcryptでハッシュ化され、平文は作成時に一度だけ表示
 5. **監査ログ**: 判定結果に関わらず、すべてのリクエストがログに記録（平文で保存）
 6. **レート制限**: HTTP APIにはキーごとの設定可能なレート制限を含む
 7. **シンボリックリンク解決**: シンボリックリンクはサンドボックス脱出を防ぐために解決
@@ -285,8 +403,9 @@ sudo pacman -S bubblewrap
 
 | サンドボックスモード | 保護レベル | 備考 |
 |---------------------|-----------|------|
-| `bwrap` | 高 | 完全な名前空間分離、本番環境推奨 |
-| `none` | 基本 | パス検証のみ、スクリプトは絶対パスでバイパス可能 |
+| `wasm` | 最高 | WASIサンドボックス、システムコールなし |
+| `bubblewrap` | 高 | 完全な名前空間分離、ネイティブバイナリ推奨 |
+| `none` | 基本 | パス検証のみ、信頼できるコマンド用 |
 
 ## 開発
 
@@ -305,7 +424,7 @@ mcp-gatekeeper/
 │   └── admin/           # TUI管理ツール
 ├── internal/
 │   ├── auth/            # APIキー認証
-│   ├── policy/          # ポリシー評価エンジン
+│   ├── policy/          # 引数評価エンジン
 │   ├── executor/        # コマンド実行エンジン
 │   ├── db/              # データベースアクセス層
 │   ├── mcp/             # MCPプロトコル実装

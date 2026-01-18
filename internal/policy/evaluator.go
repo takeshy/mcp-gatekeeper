@@ -14,7 +14,7 @@ type Decision struct {
 	Reason       string
 }
 
-// Evaluator evaluates policies against requests
+// Evaluator evaluates tools against requests
 type Evaluator struct {
 	matcher *Matcher
 }
@@ -26,122 +26,51 @@ func NewEvaluator() *Evaluator {
 	}
 }
 
-// EvaluateRequest represents a command execution request
-type EvaluateRequest struct {
-	Cwd     string
-	Cmdline string
-	EnvKeys []string
-}
-
-// Evaluate evaluates a policy against a request
-func (e *Evaluator) Evaluate(policy *db.Policy, req *EvaluateRequest) (*Decision, error) {
+// EvaluateArgs evaluates if the given arguments are allowed for a tool
+func (e *Evaluator) EvaluateArgs(tool *db.Tool, args []string) (*Decision, error) {
 	decision := &Decision{
 		MatchedRules: make([]string, 0),
 	}
 
-	// Check CWD first
-	cwdAllowed, cwdPattern, err := e.matcher.MatchCwd(policy.AllowedCwdGlobs, req.Cwd)
-	if err != nil {
-		return nil, fmt.Errorf("failed to match cwd: %w", err)
-	}
-	if !cwdAllowed {
-		decision.Allowed = false
-		decision.Reason = fmt.Sprintf("cwd %q not in allowed paths", req.Cwd)
-		return decision, nil
-	}
-	if cwdPattern != "" {
-		decision.MatchedRules = append(decision.MatchedRules, fmt.Sprintf("cwd_allow:%s", cwdPattern))
-	}
+	// Join arguments for matching
+	cmdline := strings.Join(args, " ")
 
-	// Check command based on precedence
-	switch policy.Precedence {
-	case db.PrecedenceDenyOverrides:
-		return e.evaluateDenyOverrides(policy, req, decision)
-	case db.PrecedenceAllowOverrides:
-		return e.evaluateAllowOverrides(policy, req, decision)
-	default:
-		return nil, fmt.Errorf("unknown precedence: %s", policy.Precedence)
-	}
-}
-
-// evaluateDenyOverrides: deny rules take precedence over allow rules
-func (e *Evaluator) evaluateDenyOverrides(policy *db.Policy, req *EvaluateRequest, decision *Decision) (*Decision, error) {
-	// Check denied patterns first
-	if denyMatched, pattern, err := e.matcher.MatchAny(policy.DeniedCmdGlobs, req.Cmdline); err != nil {
-		return nil, fmt.Errorf("failed to match deny patterns: %w", err)
-	} else if denyMatched {
-		decision.Allowed = false
-		decision.Reason = fmt.Sprintf("command denied by pattern %q", pattern)
-		decision.MatchedRules = append(decision.MatchedRules, fmt.Sprintf("cmd_deny:%s", pattern))
-		return decision, nil
-	}
-
-	// Check allowed patterns
-	if len(policy.AllowedCmdGlobs) == 0 {
-		// No allow rules = allow all (that aren't denied)
+	// If AllowedArgGlobs is empty, allow all arguments
+	if len(tool.AllowedArgGlobs) == 0 {
 		decision.Allowed = true
-		decision.Reason = "allowed (no allow rules, not denied)"
+		decision.Reason = "allowed (no argument restrictions)"
 		return decision, nil
 	}
 
-	if allowMatched, pattern, err := e.matcher.MatchAny(policy.AllowedCmdGlobs, req.Cmdline); err != nil {
-		return nil, fmt.Errorf("failed to match allow patterns: %w", err)
-	} else if allowMatched {
-		decision.Allowed = true
-		decision.Reason = fmt.Sprintf("allowed by pattern %q", pattern)
-		decision.MatchedRules = append(decision.MatchedRules, fmt.Sprintf("cmd_allow:%s", pattern))
-		return decision, nil
+	// Check if any pattern matches
+	for _, pattern := range tool.AllowedArgGlobs {
+		matched, err := e.matcher.Match(pattern, cmdline)
+		if err != nil {
+			return nil, fmt.Errorf("failed to match pattern %q: %w", pattern, err)
+		}
+		if matched {
+			decision.Allowed = true
+			decision.Reason = fmt.Sprintf("allowed by pattern %q", pattern)
+			decision.MatchedRules = append(decision.MatchedRules, fmt.Sprintf("arg_allow:%s", pattern))
+			return decision, nil
+		}
 	}
 
-	// Not in allow list
+	// No pattern matched
 	decision.Allowed = false
-	decision.Reason = "command not in allowed patterns"
-	return decision, nil
-}
-
-// evaluateAllowOverrides: allow rules take precedence over deny rules
-func (e *Evaluator) evaluateAllowOverrides(policy *db.Policy, req *EvaluateRequest, decision *Decision) (*Decision, error) {
-	// Check allowed patterns first
-	if allowMatched, pattern, err := e.matcher.MatchAny(policy.AllowedCmdGlobs, req.Cmdline); err != nil {
-		return nil, fmt.Errorf("failed to match allow patterns: %w", err)
-	} else if allowMatched {
-		decision.Allowed = true
-		decision.Reason = fmt.Sprintf("allowed by pattern %q (overrides deny)", pattern)
-		decision.MatchedRules = append(decision.MatchedRules, fmt.Sprintf("cmd_allow:%s", pattern))
-		return decision, nil
-	}
-
-	// Check denied patterns
-	if denyMatched, pattern, err := e.matcher.MatchAny(policy.DeniedCmdGlobs, req.Cmdline); err != nil {
-		return nil, fmt.Errorf("failed to match deny patterns: %w", err)
-	} else if denyMatched {
-		decision.Allowed = false
-		decision.Reason = fmt.Sprintf("command denied by pattern %q", pattern)
-		decision.MatchedRules = append(decision.MatchedRules, fmt.Sprintf("cmd_deny:%s", pattern))
-		return decision, nil
-	}
-
-	// Not explicitly allowed or denied
-	if len(policy.AllowedCmdGlobs) == 0 {
-		decision.Allowed = true
-		decision.Reason = "allowed (no restrictions)"
-		return decision, nil
-	}
-
-	decision.Allowed = false
-	decision.Reason = "command not in allowed patterns"
+	decision.Reason = "arguments not in allowed patterns"
 	return decision, nil
 }
 
 // FilterEnvKeys filters environment variable keys based on allowed patterns
-func (e *Evaluator) FilterEnvKeys(policy *db.Policy, envKeys []string) []string {
-	if len(policy.AllowedEnvKeys) == 0 {
+func (e *Evaluator) FilterEnvKeys(allowedEnvKeys []string, envKeys []string) []string {
+	if len(allowedEnvKeys) == 0 {
 		return envKeys // No restrictions
 	}
 
 	var filtered []string
 	for _, key := range envKeys {
-		for _, pattern := range policy.AllowedEnvKeys {
+		for _, pattern := range allowedEnvKeys {
 			matched, _ := e.matcher.Match(pattern, key)
 			if matched {
 				filtered = append(filtered, key)
@@ -152,27 +81,38 @@ func (e *Evaluator) FilterEnvKeys(policy *db.Policy, envKeys []string) []string 
 	return filtered
 }
 
-// ValidatePolicy validates a policy configuration
-func ValidatePolicy(policy *db.Policy) error {
+// ValidateTool validates a tool configuration
+func ValidateTool(tool *db.Tool) error {
 	matcher := NewMatcher()
 
 	// Validate glob patterns
-	for _, pattern := range policy.AllowedCwdGlobs {
+	for _, pattern := range tool.AllowedArgGlobs {
 		if _, err := matcher.Compile(pattern); err != nil {
-			return fmt.Errorf("invalid allowed_cwd_glob %q: %w", pattern, err)
+			return fmt.Errorf("invalid allowed_arg_glob %q: %w", pattern, err)
 		}
 	}
-	for _, pattern := range policy.AllowedCmdGlobs {
-		if _, err := matcher.Compile(pattern); err != nil {
-			return fmt.Errorf("invalid allowed_cmd_glob %q: %w", pattern, err)
-		}
+
+	// Validate sandbox type
+	switch tool.Sandbox {
+	case db.SandboxTypeNone, db.SandboxTypeBubblewrap, db.SandboxTypeWasm:
+		// Valid
+	default:
+		return fmt.Errorf("invalid sandbox type %q", tool.Sandbox)
 	}
-	for _, pattern := range policy.DeniedCmdGlobs {
-		if _, err := matcher.Compile(pattern); err != nil {
-			return fmt.Errorf("invalid denied_cmd_glob %q: %w", pattern, err)
-		}
+
+	// Validate wasm binary path for wasm sandbox
+	if tool.Sandbox == db.SandboxTypeWasm && tool.WasmBinary == "" {
+		return fmt.Errorf("wasm_binary is required for wasm sandbox")
 	}
-	for _, pattern := range policy.AllowedEnvKeys {
+
+	return nil
+}
+
+// ValidateAllowedEnvKeys validates allowed env key patterns
+func ValidateAllowedEnvKeys(patterns []string) error {
+	matcher := NewMatcher()
+
+	for _, pattern := range patterns {
 		if _, err := matcher.Compile(pattern); err != nil {
 			return fmt.Errorf("invalid allowed_env_key %q: %w", pattern, err)
 		}

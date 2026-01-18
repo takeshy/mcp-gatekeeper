@@ -2,25 +2,27 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 )
 
 // APIKey represents an API key record
 type APIKey struct {
-	ID         int64
-	Name       string
-	KeyHash    string
-	Status     string
-	CreatedAt  time.Time
-	RevokedAt  sql.NullTime
-	LastUsedAt sql.NullTime
+	ID             int64
+	Name           string
+	KeyHash        string
+	Status         string
+	AllowedEnvKeys []string
+	CreatedAt      time.Time
+	RevokedAt      sql.NullTime
+	LastUsedAt     sql.NullTime
 }
 
 // CreateAPIKey creates a new API key
 func (db *DB) CreateAPIKey(name, keyHash string) (*APIKey, error) {
 	result, err := db.Exec(
-		"INSERT INTO api_keys (name, key_hash) VALUES (?, ?)",
+		"INSERT INTO api_keys (name, key_hash, allowed_env_keys) VALUES (?, ?, '[]')",
 		name, keyHash,
 	)
 	if err != nil {
@@ -37,12 +39,13 @@ func (db *DB) CreateAPIKey(name, keyHash string) (*APIKey, error) {
 
 // GetAPIKeyByID retrieves an API key by ID
 func (db *DB) GetAPIKeyByID(id int64) (*APIKey, error) {
+	var allowedEnvKeysJSON string
 	key := &APIKey{}
 	err := db.QueryRow(`
-		SELECT id, name, key_hash, status, created_at, revoked_at, last_used_at
+		SELECT id, name, key_hash, status, allowed_env_keys, created_at, revoked_at, last_used_at
 		FROM api_keys WHERE id = ?
 	`, id).Scan(
-		&key.ID, &key.Name, &key.KeyHash, &key.Status,
+		&key.ID, &key.Name, &key.KeyHash, &key.Status, &allowedEnvKeysJSON,
 		&key.CreatedAt, &key.RevokedAt, &key.LastUsedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -50,18 +53,22 @@ func (db *DB) GetAPIKeyByID(id int64) (*APIKey, error) {
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get API key: %w", err)
+	}
+	if err := json.Unmarshal([]byte(allowedEnvKeysJSON), &key.AllowedEnvKeys); err != nil {
+		return nil, fmt.Errorf("failed to parse allowed_env_keys: %w", err)
 	}
 	return key, nil
 }
 
 // GetAPIKeyByHash retrieves an API key by its hash
 func (db *DB) GetAPIKeyByHash(keyHash string) (*APIKey, error) {
+	var allowedEnvKeysJSON string
 	key := &APIKey{}
 	err := db.QueryRow(`
-		SELECT id, name, key_hash, status, created_at, revoked_at, last_used_at
+		SELECT id, name, key_hash, status, allowed_env_keys, created_at, revoked_at, last_used_at
 		FROM api_keys WHERE key_hash = ?
 	`, keyHash).Scan(
-		&key.ID, &key.Name, &key.KeyHash, &key.Status,
+		&key.ID, &key.Name, &key.KeyHash, &key.Status, &allowedEnvKeysJSON,
 		&key.CreatedAt, &key.RevokedAt, &key.LastUsedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -69,6 +76,9 @@ func (db *DB) GetAPIKeyByHash(keyHash string) (*APIKey, error) {
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get API key: %w", err)
+	}
+	if err := json.Unmarshal([]byte(allowedEnvKeysJSON), &key.AllowedEnvKeys); err != nil {
+		return nil, fmt.Errorf("failed to parse allowed_env_keys: %w", err)
 	}
 	return key, nil
 }
@@ -76,7 +86,7 @@ func (db *DB) GetAPIKeyByHash(keyHash string) (*APIKey, error) {
 // ListAPIKeys retrieves all API keys
 func (db *DB) ListAPIKeys() ([]*APIKey, error) {
 	rows, err := db.Query(`
-		SELECT id, name, key_hash, status, created_at, revoked_at, last_used_at
+		SELECT id, name, key_hash, status, allowed_env_keys, created_at, revoked_at, last_used_at
 		FROM api_keys ORDER BY created_at DESC
 	`)
 	if err != nil {
@@ -86,13 +96,17 @@ func (db *DB) ListAPIKeys() ([]*APIKey, error) {
 
 	var keys []*APIKey
 	for rows.Next() {
+		var allowedEnvKeysJSON string
 		key := &APIKey{}
 		err := rows.Scan(
-			&key.ID, &key.Name, &key.KeyHash, &key.Status,
+			&key.ID, &key.Name, &key.KeyHash, &key.Status, &allowedEnvKeysJSON,
 			&key.CreatedAt, &key.RevokedAt, &key.LastUsedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan API key: %w", err)
+		}
+		if err := json.Unmarshal([]byte(allowedEnvKeysJSON), &key.AllowedEnvKeys); err != nil {
+			return nil, fmt.Errorf("failed to parse allowed_env_keys: %w", err)
 		}
 		keys = append(keys, key)
 	}
@@ -123,11 +137,28 @@ func (db *DB) UpdateAPIKeyLastUsed(id int64) error {
 	return nil
 }
 
-// DeleteAPIKey deletes an API key (and its policy via CASCADE)
+// DeleteAPIKey deletes an API key (and its tools via CASCADE)
 func (db *DB) DeleteAPIKey(id int64) error {
 	_, err := db.Exec("DELETE FROM api_keys WHERE id = ?", id)
 	if err != nil {
 		return fmt.Errorf("failed to delete API key: %w", err)
+	}
+	return nil
+}
+
+// UpdateAPIKeyAllowedEnvKeys updates the allowed env keys for an API key
+func (db *DB) UpdateAPIKeyAllowedEnvKeys(id int64, allowedEnvKeys []string) error {
+	allowedEnvKeysJSON, err := json.Marshal(allowedEnvKeys)
+	if err != nil {
+		return fmt.Errorf("failed to marshal allowed_env_keys: %w", err)
+	}
+
+	_, err = db.Exec(
+		"UPDATE api_keys SET allowed_env_keys = ? WHERE id = ?",
+		string(allowedEnvKeysJSON), id,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update allowed env keys: %w", err)
 	}
 	return nil
 }
