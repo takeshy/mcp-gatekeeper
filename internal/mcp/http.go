@@ -77,6 +77,7 @@ type HTTPServer struct {
 type HTTPConfig struct {
 	RateLimit       int
 	RateLimitWindow time.Duration
+	RootDir         string
 }
 
 // DefaultHTTPConfig returns the default HTTP configuration
@@ -93,12 +94,18 @@ func NewHTTPServer(database *db.DB, config *HTTPConfig) *HTTPServer {
 		config = DefaultHTTPConfig()
 	}
 
+	execConfig := &executor.ExecutorConfig{
+		Timeout:   executor.DefaultTimeout,
+		MaxOutput: executor.DefaultMaxOutput,
+		RootDir:   config.RootDir,
+	}
+
 	s := &HTTPServer{
 		db:          database,
 		auth:        auth.NewAuthenticator(database),
 		evaluator:   policy.NewEvaluator(),
 		normalizer:  executor.NewNormalizer(),
-		executor:    executor.NewExecutor(nil),
+		executor:    executor.NewExecutor(execConfig),
 		rateLimiter: NewRateLimiter(config.RateLimit, config.RateLimitWindow),
 	}
 

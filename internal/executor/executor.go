@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -19,6 +21,7 @@ const (
 type ExecutorConfig struct {
 	Timeout   time.Duration
 	MaxOutput int
+	RootDir   string // If set, restricts execution to this directory (jail/sandbox)
 }
 
 // DefaultConfig returns the default executor configuration
@@ -55,6 +58,13 @@ func NewExecutor(config *ExecutorConfig) *Executor {
 func (e *Executor) Execute(ctx context.Context, cwd, cmd string, args []string, env []string) (*ExecuteResult, error) {
 	result := &ExecuteResult{}
 	startTime := time.Now()
+
+	// Validate paths if RootDir is set (jail mode)
+	if e.config.RootDir != "" {
+		if err := e.validatePath(cwd); err != nil {
+			return nil, fmt.Errorf("cwd validation failed: %w", err)
+		}
+	}
 
 	// Create context with timeout
 	execCtx, cancel := context.WithTimeout(ctx, e.config.Timeout)
@@ -171,4 +181,62 @@ func (b *limitedBuffer) Write(p []byte) (n int, err error) {
 
 func (b *limitedBuffer) String() string {
 	return b.buf.String()
+}
+
+// validatePath checks if a path is within the configured RootDir
+func (e *Executor) validatePath(path string) error {
+	if e.config.RootDir == "" {
+		return nil
+	}
+
+	// Resolve to absolute paths
+	rootAbs, err := filepath.Abs(e.config.RootDir)
+	if err != nil {
+		return fmt.Errorf("failed to resolve root dir: %w", err)
+	}
+
+	// Evaluate symlinks for root
+	rootReal, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return fmt.Errorf("failed to evaluate root dir symlinks: %w", err)
+	}
+
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("failed to resolve path: %w", err)
+	}
+
+	// Evaluate symlinks for path
+	pathReal, err := filepath.EvalSymlinks(pathAbs)
+	if err != nil {
+		// Path might not exist yet, check parent
+		pathReal = pathAbs
+	}
+
+	// Check if path is within root
+	if !IsPathWithinRoot(rootReal, pathReal) {
+		return fmt.Errorf("path %q is outside root directory %q", path, e.config.RootDir)
+	}
+
+	return nil
+}
+
+// IsPathWithinRoot checks if a path is within or equal to the root directory
+func IsPathWithinRoot(root, path string) bool {
+	// Clean and normalize paths
+	root = filepath.Clean(root)
+	path = filepath.Clean(path)
+
+	// Ensure root ends with separator for proper prefix matching
+	if !strings.HasSuffix(root, string(filepath.Separator)) {
+		root = root + string(filepath.Separator)
+	}
+
+	// Path is within root if it equals root or starts with root
+	return path+"/" == root || strings.HasPrefix(path+string(filepath.Separator), root)
+}
+
+// GetRootDir returns the configured root directory
+func (e *Executor) GetRootDir() string {
+	return e.config.RootDir
 }

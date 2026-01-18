@@ -36,7 +36,7 @@ type StdioServer struct {
 }
 
 // NewStdioServer creates a new stdio MCP server
-func NewStdioServer(database *db.DB, apiKeyStr string) (*StdioServer, error) {
+func NewStdioServer(database *db.DB, apiKeyStr string, rootDir string) (*StdioServer, error) {
 	authenticator := auth.NewAuthenticator(database)
 
 	// Authenticate API key
@@ -57,12 +57,18 @@ func NewStdioServer(database *db.DB, apiKeyStr string) (*StdioServer, error) {
 		return nil, fmt.Errorf("no policy found for API key")
 	}
 
+	execConfig := &executor.ExecutorConfig{
+		Timeout:   executor.DefaultTimeout,
+		MaxOutput: executor.DefaultMaxOutput,
+		RootDir:   rootDir,
+	}
+
 	return &StdioServer{
 		db:         database,
 		auth:       authenticator,
 		evaluator:  policy.NewEvaluator(),
 		normalizer: executor.NewNormalizer(),
-		executor:   executor.NewExecutor(nil),
+		executor:   executor.NewExecutor(execConfig),
 		apiKey:     apiKey,
 		policy:     pol,
 		reader:     bufio.NewReader(os.Stdin),

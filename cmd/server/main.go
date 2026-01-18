@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -21,8 +22,33 @@ func main() {
 		addr      = flag.String("addr", ":8080", "HTTP server address (for http mode)")
 		apiKey    = flag.String("api-key", "", "API key for stdio mode (or MCP_GATEKEEPER_API_KEY env var)")
 		rateLimit = flag.Int("rate-limit", 500, "Rate limit per API key per minute (for http mode)")
+		rootDir   = flag.String("root-dir", "", "Root directory for command execution (required, acts as chroot)")
 	)
 	flag.Parse()
+
+	// Validate required root-dir
+	if *rootDir == "" {
+		fmt.Fprintf(os.Stderr, "Error: --root-dir is required\n")
+		fmt.Fprintf(os.Stderr, "Usage: %s --root-dir=/path/to/allowed/directory [options]\n", os.Args[0])
+		os.Exit(1)
+	}
+
+	// Validate root-dir exists and is a directory
+	rootDirAbs, err := filepath.Abs(*rootDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid root-dir path: %v\n", err)
+		os.Exit(1)
+	}
+
+	info, err := os.Stat(rootDirAbs)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: root-dir does not exist: %v\n", err)
+		os.Exit(1)
+	}
+	if !info.IsDir() {
+		fmt.Fprintf(os.Stderr, "Error: root-dir is not a directory: %s\n", rootDirAbs)
+		os.Exit(1)
+	}
 
 	// Get API key from env if not provided
 	if *apiKey == "" {
@@ -40,12 +66,12 @@ func main() {
 	// Run in appropriate mode
 	switch *mode {
 	case "stdio":
-		if err := runStdio(database, *apiKey); err != nil {
+		if err := runStdio(database, *apiKey, rootDirAbs); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 	case "http":
-		if err := runHTTP(database, *addr, *rateLimit); err != nil {
+		if err := runHTTP(database, *addr, *rateLimit, rootDirAbs); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -55,12 +81,12 @@ func main() {
 	}
 }
 
-func runStdio(database *db.DB, apiKey string) error {
+func runStdio(database *db.DB, apiKey string, rootDir string) error {
 	if apiKey == "" {
 		return fmt.Errorf("API key required for stdio mode (use --api-key or MCP_GATEKEEPER_API_KEY env var)")
 	}
 
-	server, err := mcp.NewStdioServer(database, apiKey)
+	server, err := mcp.NewStdioServer(database, apiKey, rootDir)
 	if err != nil {
 		return fmt.Errorf("failed to create stdio server: %w", err)
 	}
@@ -79,10 +105,11 @@ func runStdio(database *db.DB, apiKey string) error {
 	return server.Run(ctx)
 }
 
-func runHTTP(database *db.DB, addr string, rateLimit int) error {
+func runHTTP(database *db.DB, addr string, rateLimit int, rootDir string) error {
 	config := &mcp.HTTPConfig{
 		RateLimit:       rateLimit,
 		RateLimitWindow: time.Minute,
+		RootDir:         rootDir,
 	}
 	server := mcp.NewHTTPServer(database, config)
 
@@ -105,7 +132,7 @@ func runHTTP(database *db.DB, addr string, rateLimit int) error {
 		httpServer.Shutdown(ctx)
 	}()
 
-	fmt.Printf("Starting HTTP server on %s\n", addr)
+	fmt.Printf("Starting HTTP server on %s (root-dir: %s)\n", addr, rootDir)
 	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		return fmt.Errorf("HTTP server error: %w", err)
 	}
