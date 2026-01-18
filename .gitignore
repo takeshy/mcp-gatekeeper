@@ -1,0 +1,21 @@
+# Binaries
+mcp-gatekeeper-server
+mcp-gatekeeper-admin
+*.exe
+
+# Database
+*.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test coverage
+coverage.out
+coverage.html
