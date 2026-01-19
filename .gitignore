@@ -1,7 +1,11 @@
 # Binaries
+mcp-gatekeeper
 mcp-gatekeeper-server
 mcp-gatekeeper-admin
 *.exe
+
+# Release artifacts
+dist/
 
 # Database
 *.db
