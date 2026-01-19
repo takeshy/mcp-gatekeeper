@@ -1,11 +1,5 @@
 package executor
 
-// These tests require ruby.wasm to be installed.
-// To run these tests:
-// 1. Download ruby.wasm from https://github.com/ruby/ruby.wasm/releases
-// 2. Extract to /opt/ruby-3.2-wasm32-unknown-wasip1-full/
-// 3. Uncomment the tests below and run: go test -v ./internal/executor/ -run TestWasm
-
 /*
 import (
 	"context"
@@ -17,7 +11,8 @@ import (
 )
 
 const (
-	rubyWasmPath = "/opt/ruby-3.2-wasm32-unknown-wasip1-full/usr/local/bin/ruby"
+	rubyWasmPath = "/opt/ruby-wasm/usr/local/bin/ruby"
+	wasmDir      = "/opt"
 )
 
 func TestWasmExecutor_RubyVersion(t *testing.T) {
@@ -26,7 +21,7 @@ func TestWasmExecutor_RubyVersion(t *testing.T) {
 	}
 
 	tmpDir := t.TempDir()
-	executor := NewWasmExecutor(tmpDir)
+	executor := NewWasmExecutor(tmpDir, wasmDir)
 
 	ctx := context.Background()
 	result, err := executor.Execute(ctx, rubyWasmPath, tmpDir, []string{"-v"}, nil, 30*time.Second, 1024*1024)
@@ -35,7 +30,7 @@ func TestWasmExecutor_RubyVersion(t *testing.T) {
 	}
 
 	if !strings.Contains(result.Stdout, "ruby") {
-		t.Errorf("Expected stdout to contain 'ruby', got: %s", result.Stdout)
+		t.Errorf("Expected stdout to contain 'ruby', got: %s (stderr: %s)", result.Stdout, result.Stderr)
 	}
 
 	t.Logf("Ruby version: %s", strings.TrimSpace(result.Stdout))
@@ -47,7 +42,7 @@ func TestWasmExecutor_RubyHelloWorld(t *testing.T) {
 	}
 
 	tmpDir := t.TempDir()
-	executor := NewWasmExecutor(tmpDir)
+	executor := NewWasmExecutor(tmpDir, wasmDir)
 
 	ctx := context.Background()
 	result, err := executor.Execute(ctx, rubyWasmPath, tmpDir, []string{"-e", "puts 'Hello, WASM!'"}, nil, 30*time.Second, 1024*1024)
@@ -57,7 +52,7 @@ func TestWasmExecutor_RubyHelloWorld(t *testing.T) {
 
 	expected := "Hello, WASM!"
 	if !strings.Contains(result.Stdout, expected) {
-		t.Errorf("Expected stdout to contain %q, got: %s", expected, result.Stdout)
+		t.Errorf("Expected stdout to contain %q, got: %s (stderr: %s)", expected, result.Stdout, result.Stderr)
 	}
 }
 
@@ -67,7 +62,7 @@ func TestWasmExecutor_RubyArithmetic(t *testing.T) {
 	}
 
 	tmpDir := t.TempDir()
-	executor := NewWasmExecutor(tmpDir)
+	executor := NewWasmExecutor(tmpDir, wasmDir)
 
 	ctx := context.Background()
 	result, err := executor.Execute(ctx, rubyWasmPath, tmpDir, []string{"-e", "puts 2 + 3 * 4"}, nil, 30*time.Second, 1024*1024)
@@ -77,7 +72,27 @@ func TestWasmExecutor_RubyArithmetic(t *testing.T) {
 
 	expected := "14"
 	if !strings.Contains(result.Stdout, expected) {
-		t.Errorf("Expected stdout to contain %q, got: %s", expected, result.Stdout)
+		t.Errorf("Expected stdout to contain %q, got: %s (stderr: %s)", expected, result.Stdout, result.Stderr)
+	}
+}
+
+func TestWasmExecutor_RubyJSON(t *testing.T) {
+	if _, err := os.Stat(rubyWasmPath); os.IsNotExist(err) {
+		t.Skip("ruby.wasm not found at", rubyWasmPath)
+	}
+
+	tmpDir := t.TempDir()
+	executor := NewWasmExecutor(tmpDir, wasmDir)
+
+	ctx := context.Background()
+	result, err := executor.Execute(ctx, rubyWasmPath, tmpDir, []string{"-e", "require 'json'; puts JSON.generate({ok: true})"}, nil, 30*time.Second, 1024*1024)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	expected := `{"ok":true}`
+	if !strings.Contains(result.Stdout, expected) {
+		t.Errorf("Expected stdout to contain %q, got: %s (stderr: %s)", expected, result.Stdout, result.Stderr)
 	}
 }
 
@@ -95,17 +110,19 @@ func TestWasmExecutor_RubyReadFile(t *testing.T) {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
-	executor := NewWasmExecutor(tmpDir)
+	executor := NewWasmExecutor(tmpDir, wasmDir)
 
 	ctx := context.Background()
-	script := `puts File.read('` + testFile + `')`
+	// Use guest path (relative to tmpDir which is mounted as /)
+	guestTestFile := "/test.txt"
+	script := `puts File.read('` + guestTestFile + `')`
 	result, err := executor.Execute(ctx, rubyWasmPath, tmpDir, []string{"-e", script}, nil, 30*time.Second, 1024*1024)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
 
 	if !strings.Contains(result.Stdout, testContent) {
-		t.Errorf("Expected stdout to contain %q, got: %s", testContent, result.Stdout)
+		t.Errorf("Expected stdout to contain %q, got: %s (stderr: %s)", testContent, result.Stdout, result.Stderr)
 	}
 }
 
@@ -115,20 +132,21 @@ func TestWasmExecutor_RubyWriteFile(t *testing.T) {
 	}
 
 	tmpDir := t.TempDir()
-	executor := NewWasmExecutor(tmpDir)
+	executor := NewWasmExecutor(tmpDir, wasmDir)
 
 	outputFile := filepath.Join(tmpDir, "output.txt")
+	guestOutputFile := "/output.txt"
 	outputContent := "Written by Ruby WASM"
 
 	ctx := context.Background()
-	script := `File.write('` + outputFile + `', '` + outputContent + `'); puts 'done'`
+	script := `File.write('` + guestOutputFile + `', '` + outputContent + `'); puts 'done'`
 	result, err := executor.Execute(ctx, rubyWasmPath, tmpDir, []string{"-e", script}, nil, 30*time.Second, 1024*1024)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
 
 	if !strings.Contains(result.Stdout, "done") {
-		t.Errorf("Expected stdout to contain 'done', got: %s", result.Stdout)
+		t.Errorf("Expected stdout to contain 'done', got: %s (stderr: %s)", result.Stdout, result.Stderr)
 	}
 
 	// Verify file was written
@@ -148,7 +166,7 @@ func TestWasmExecutor_RubyEnvironmentVariable(t *testing.T) {
 	}
 
 	tmpDir := t.TempDir()
-	executor := NewWasmExecutor(tmpDir)
+	executor := NewWasmExecutor(tmpDir, wasmDir)
 
 	ctx := context.Background()
 	env := []string{"MY_VAR=hello_wasm"}
@@ -159,7 +177,7 @@ func TestWasmExecutor_RubyEnvironmentVariable(t *testing.T) {
 
 	expected := "hello_wasm"
 	if !strings.Contains(result.Stdout, expected) {
-		t.Errorf("Expected stdout to contain %q, got: %s", expected, result.Stdout)
+		t.Errorf("Expected stdout to contain %q, got: %s (stderr: %s)", expected, result.Stdout, result.Stderr)
 	}
 }
 
@@ -169,7 +187,7 @@ func TestWasmExecutor_RubyStderr(t *testing.T) {
 	}
 
 	tmpDir := t.TempDir()
-	executor := NewWasmExecutor(tmpDir)
+	executor := NewWasmExecutor(tmpDir, wasmDir)
 
 	ctx := context.Background()
 	result, err := executor.Execute(ctx, rubyWasmPath, tmpDir, []string{"-e", "STDERR.puts 'error message'"}, nil, 30*time.Second, 1024*1024)
@@ -204,11 +222,12 @@ puts greet("WASM")
 		t.Fatalf("Failed to create script file: %v", err)
 	}
 
-	executor := NewWasmExecutor(tmpDir)
+	executor := NewWasmExecutor(tmpDir, wasmDir)
 
 	ctx := context.Background()
-	// Use -e to read and evaluate the file content since file path resolution may differ in WASM
-	script := `eval(File.read('` + scriptFile + `'))`
+	// Use guest path
+	guestScriptFile := "/script.rb"
+	script := `eval(File.read('` + guestScriptFile + `'))`
 	result, err := executor.Execute(ctx, rubyWasmPath, tmpDir, []string{"-e", script}, nil, 30*time.Second, 1024*1024)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)

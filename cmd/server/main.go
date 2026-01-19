@@ -23,6 +23,7 @@ func main() {
 		apiKey    = flag.String("api-key", "", "API key for stdio mode (or MCP_GATEKEEPER_API_KEY env var)")
 		rateLimit = flag.Int("rate-limit", 500, "Rate limit per API key per minute (for http mode)")
 		rootDir   = flag.String("root-dir", "", "Root directory for command execution (required, acts as chroot)")
+		wasmDir   = flag.String("wasm-dir", "", "Directory containing WASM binaries (mounted as /.wasm in WASM sandbox)")
 	)
 	flag.Parse()
 
@@ -50,6 +51,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Validate wasm-dir if provided
+	var wasmDirAbs string
+	if *wasmDir != "" {
+		wasmDirAbs, err = filepath.Abs(*wasmDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: invalid wasm-dir path: %v\n", err)
+			os.Exit(1)
+		}
+		info, err = os.Stat(wasmDirAbs)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: wasm-dir does not exist: %v\n", err)
+			os.Exit(1)
+		}
+		if !info.IsDir() {
+			fmt.Fprintf(os.Stderr, "Error: wasm-dir is not a directory: %s\n", wasmDirAbs)
+			os.Exit(1)
+		}
+	}
+
 	// Get API key from env if not provided
 	if *apiKey == "" {
 		*apiKey = os.Getenv("MCP_GATEKEEPER_API_KEY")
@@ -63,15 +83,18 @@ func main() {
 	}
 	defer database.Close()
 
+	// Print registered API keys and tools
+	printRegisteredTools(database)
+
 	// Run in appropriate mode
 	switch *mode {
 	case "stdio":
-		if err := runStdio(database, *apiKey, rootDirAbs); err != nil {
+		if err := runStdio(database, *apiKey, rootDirAbs, wasmDirAbs); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 	case "http":
-		if err := runHTTP(database, *addr, *rateLimit, rootDirAbs); err != nil {
+		if err := runHTTP(database, *addr, *rateLimit, rootDirAbs, wasmDirAbs); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -81,12 +104,12 @@ func main() {
 	}
 }
 
-func runStdio(database *db.DB, apiKey string, rootDir string) error {
+func runStdio(database *db.DB, apiKey string, rootDir string, wasmDir string) error {
 	if apiKey == "" {
 		return fmt.Errorf("API key required for stdio mode (use --api-key or MCP_GATEKEEPER_API_KEY env var)")
 	}
 
-	server, err := mcp.NewStdioServer(database, apiKey, rootDir)
+	server, err := mcp.NewStdioServer(database, apiKey, rootDir, wasmDir)
 	if err != nil {
 		return fmt.Errorf("failed to create stdio server: %w", err)
 	}
@@ -105,11 +128,12 @@ func runStdio(database *db.DB, apiKey string, rootDir string) error {
 	return server.Run(ctx)
 }
 
-func runHTTP(database *db.DB, addr string, rateLimit int, rootDir string) error {
+func runHTTP(database *db.DB, addr string, rateLimit int, rootDir string, wasmDir string) error {
 	config := &mcp.HTTPConfig{
 		RateLimit:       rateLimit,
 		RateLimitWindow: time.Minute,
 		RootDir:         rootDir,
+		WasmDir:         wasmDir,
 	}
 	server := mcp.NewHTTPServer(database, config)
 
@@ -132,10 +156,54 @@ func runHTTP(database *db.DB, addr string, rateLimit int, rootDir string) error 
 		httpServer.Shutdown(ctx)
 	}()
 
-	fmt.Printf("Starting HTTP server on %s (root-dir: %s)\n", addr, rootDir)
+	if wasmDir != "" {
+		fmt.Printf("Starting HTTP server on %s (root-dir: %s, wasm-dir: %s)\n", addr, rootDir, wasmDir)
+	} else {
+		fmt.Printf("Starting HTTP server on %s (root-dir: %s)\n", addr, rootDir)
+	}
 	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		return fmt.Errorf("HTTP server error: %w", err)
 	}
 
 	return nil
+}
+
+func printRegisteredTools(database *db.DB) {
+	apiKeys, err := database.ListAPIKeys()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to list API keys: %v\n", err)
+		return
+	}
+
+	fmt.Println("=== Registered API Keys and Tools ===")
+	for _, key := range apiKeys {
+		if key.Status != "active" {
+			continue
+		}
+		fmt.Printf("\n[%s] (ID: %d)\n", key.Name, key.ID)
+
+		tools, err := database.ListToolsByAPIKeyID(key.ID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  Warning: failed to list tools: %v\n", err)
+			continue
+		}
+
+		if len(tools) == 0 {
+			fmt.Println("  (no tools configured)")
+			continue
+		}
+
+		for _, tool := range tools {
+			sandboxInfo := string(tool.Sandbox)
+			if tool.Sandbox == db.SandboxTypeWasm && tool.WasmBinary != "" {
+				sandboxInfo = fmt.Sprintf("wasm: %s", tool.WasmBinary)
+			} else if tool.Sandbox == db.SandboxTypeBubblewrap {
+				sandboxInfo = fmt.Sprintf("bubblewrap: %s", tool.Command)
+			} else if tool.Sandbox == db.SandboxTypeNone {
+				sandboxInfo = fmt.Sprintf("none: %s", tool.Command)
+			}
+			fmt.Printf("  - %s: %s [%s]\n", tool.Name, tool.Description, sandboxInfo)
+		}
+	}
+	fmt.Println()
 }

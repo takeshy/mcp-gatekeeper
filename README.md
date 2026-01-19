@@ -17,9 +17,9 @@ While providing shell access, MCP Gatekeeper includes flexible security controls
 - **Directory Sandbox**: Mandatory `--root-dir` restricts all operations to a specified directory
 - **Per-Tool Sandbox Selection**: Each tool can use `none`, `bubblewrap`, or `wasm` sandbox
 - **Bubblewrap Sandboxing**: `bwrap` integration for true process isolation
-- **WASM Sandboxing**: Run WebAssembly binaries in a secure wazero runtime
+- **WASM Sandboxing**: Run WebAssembly binaries in a secure wazero runtime with module caching
 - **Dynamic Tool Registration**: Define custom tools per API key via TUI
-- **Dual Protocol Support**: Both stdio (JSON-RPC for MCP) and HTTP API modes
+- **Dual Protocol Support**: Both stdio and HTTP modes using MCP JSON-RPC protocol
 - **TUI Admin Tool**: Interactive terminal interface for managing keys, tools, and viewing logs
 - **Audit Logging**: Complete logging of all command requests and execution results
 - **Rate Limiting**: Configurable rate limiting for the HTTP API (default: 500 req/min)
@@ -86,6 +86,16 @@ In the API Key detail screen:
   --db=gatekeeper.db
 ```
 
+**With WASM directory (for external WASM binaries):**
+```bash
+./mcp-gatekeeper-server \
+  --root-dir=/home/user/projects \
+  --wasm-dir=/opt \
+  --mode=http \
+  --addr=:8080 \
+  --db=gatekeeper.db
+```
+
 **Stdio Mode (for MCP clients):**
 ```bash
 MCP_GATEKEEPER_API_KEY=your-api-key \
@@ -97,17 +107,25 @@ MCP_GATEKEEPER_API_KEY=your-api-key \
 
 ### 5. Test Execution
 
-Using curl (HTTP mode):
+Using curl with MCP JSON-RPC protocol (HTTP mode):
 ```bash
-# List available tools
-curl http://localhost:8080/v1/tools \
-  -H "Authorization: Bearer your-api-key"
-
-# Call a tool
-curl -X POST http://localhost:8080/v1/tools/git \
+# Initialize
+curl -X POST http://localhost:8080/mcp \
   -H "Authorization: Bearer your-api-key" \
   -H "Content-Type: application/json" \
-  -d '{"cwd": "/home/user/projects", "args": ["status", "--short"]}'
+  -d '{"jsonrpc": "2.0", "id": 1, "method": "initialize"}'
+
+# List available tools
+curl -X POST http://localhost:8080/mcp \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "id": 2, "method": "tools/list"}'
+
+# Call a tool
+curl -X POST http://localhost:8080/mcp \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "git", "arguments": {"cwd": "/home/user/projects", "args": ["status", "--short"]}}}'
 ```
 
 ## Configuration
@@ -117,6 +135,7 @@ curl -X POST http://localhost:8080/v1/tools/git \
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--root-dir` | (required) | Root directory for command execution (sandbox) |
+| `--wasm-dir` | - | Directory containing WASM binaries (mounted as `/.wasm` in WASM sandbox) |
 | `--mode` | `stdio` | Server mode: `stdio` or `http` |
 | `--db` | `gatekeeper.db` | SQLite database path |
 | `--addr` | `:8080` | HTTP server address (for http mode) |
@@ -135,6 +154,19 @@ The `--root-dir` option is **required** and creates a chroot-like sandbox:
 - Commands cannot access paths outside the root directory
 - Symlinks are resolved to prevent escape attempts
 - The server refuses to start without this option
+
+### WASM Directory (--wasm-dir)
+
+The `--wasm-dir` option allows WASM binaries to be located outside the root directory:
+
+```bash
+# WASM binaries in /opt, working directory in /home/user/projects
+./mcp-gatekeeper-server --root-dir=/home/user/projects --wasm-dir=/opt --mode=http
+```
+
+- WASM binaries are mounted as `/.wasm` inside the WASM sandbox
+- Working directory (`--root-dir`) is mounted as `/` inside the WASM sandbox
+- This allows separation of WASM runtimes from user data
 
 ### Tool Configuration
 
@@ -187,6 +219,7 @@ For maximum isolation, you can run WebAssembly binaries:
 - Runs in wazero runtime (pure Go, no CGO)
 - Filesystem access restricted to root directory
 - No network access
+- **Compiled modules are cached** for fast subsequent executions
 
 **Creating WASM binaries:**
 
@@ -236,26 +269,39 @@ tar xzf ruby-*-wasm32-unknown-wasip1-full.tar.gz
 
 *Python (python.wasm):*
 ```bash
-# Download from https://github.com/nickstenning/python-wasm/releases or build from source
-# Use: python.wasm
+# Download from VMware Labs WebAssembly Language Runtimes
+# https://github.com/vmware-labs/webassembly-language-runtimes/releases
+# Look for python-*.wasm releases
+curl -LO "https://github.com/vmware-labs/webassembly-language-runtimes/releases/download/python/3.12.0%2B20231211-040d5a6/python-3.12.0.wasm"
+# Use: python-3.12.0.wasm (standard library is bundled, ~26MB)
 ```
 
-*Node.js is not available as WASI, but you can use QuickJS:*
+*JavaScript (QuickJS):*
 ```bash
-# Download from https://nickstenning.github.io/verless-quickjs-wasm/
-# Or build from https://github.com/nickstenning/verless-quickjs-wasm
-curl -LO https://nickstenning.github.io/verless-quickjs-wasm/quickjs.wasm
-# Use: quickjs.wasm
+# Download from QuickJS-NG releases
+# https://github.com/quickjs-ng/quickjs/releases
+curl -LO "https://github.com/quickjs-ng/quickjs/releases/latest/download/qjs-wasi.wasm"
+# Use: qjs-wasi.wasm (~1.4MB, JSON is built-in)
 ```
+
+**WASM Runtime Comparison:**
+
+| Runtime | Size | Compile Time | JSON Support |
+|---------|------|--------------|--------------|
+| Ruby | ~50MB (with stdlib) | ~9s | `require 'json'` (auto-configured) |
+| Python | ~26MB (bundled) | ~3.6s | `import json` (built-in) |
+| QuickJS | ~1.4MB | ~0.5s | `JSON.stringify()` (built-in) |
+
+Note: Compile time is for first execution only. Compiled modules are cached for fast subsequent runs.
 
 **Configuring a WASM tool:**
 
 In the TUI, create a tool with:
-- **Name**: `my-tool`
-- **Description**: `My WASM tool`
-- **Command**: `my-tool` (any value, not used for WASM)
+- **Name**: `ruby`
+- **Description**: `Execute Ruby scripts in WASM sandbox`
+- **Command**: `ruby` (any value, not used for WASM)
 - **Sandbox**: `wasm`
-- **WASM Binary**: `/path/to/my-tool.wasm`
+- **WASM Binary**: `/opt/ruby-wasm/usr/local/bin/ruby`
 
 The WASM binary receives arguments via WASI's `args_get` and can access files within the root directory.
 
@@ -279,88 +325,117 @@ Examples for `allowed_arg_globs`:
 
 ## API Reference
 
-### HTTP API
+### MCP JSON-RPC Protocol
 
-#### GET /v1/tools
+Both stdio and HTTP modes use MCP JSON-RPC 2.0 protocol. HTTP mode accepts requests at `POST /mcp`.
+
+#### initialize
+
+Initialize the MCP session.
+
+**Request:**
+```json
+{"jsonrpc": "2.0", "id": 1, "method": "initialize"}
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "protocolVersion": "2024-11-05",
+    "capabilities": {"tools": {}},
+    "serverInfo": {"name": "mcp-gatekeeper", "version": "1.0.0"}
+  }
+}
+```
+
+#### tools/list
 
 List available tools for the authenticated API key.
 
-**Headers:**
-- `Authorization: Bearer <api-key>` (required)
+**Request:**
+```json
+{"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
+```
 
 **Response:**
 ```json
 {
-  "tools": [
-    {
-      "name": "git",
-      "description": "Run git commands",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "cwd": {"type": "string", "description": "Working directory"},
-          "args": {"type": "array", "items": {"type": "string"}, "description": "Command arguments"}
-        },
-        "required": ["cwd"]
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "tools": [
+      {
+        "name": "git",
+        "description": "Run git commands",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "cwd": {"type": "string", "description": "Working directory for the command (defaults to root directory)"},
+            "args": {"type": "array", "items": {"type": "string"}, "description": "Command arguments"}
+          },
+          "required": []
+        }
       }
-    }
-  ]
+    ]
+  }
 }
 ```
 
-#### POST /v1/tools/{toolName}
+#### tools/call
 
 Execute a tool.
 
-**Headers:**
-- `Authorization: Bearer <api-key>` (required)
-
-**Request Body:**
+**Request:**
 ```json
 {
-  "cwd": "/path/to/directory",
-  "args": ["arg1", "arg2"]
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "git",
+    "arguments": {
+      "cwd": "/path/to/directory",
+      "args": ["status", "--short"]
+    }
+  }
 }
 ```
 
 **Response:**
 ```json
 {
-  "exit_code": 0,
-  "stdout": "output...",
-  "stderr": "",
-  "duration_ms": 45
+  "jsonrpc": "2.0",
+  "id": 3,
+  "result": {
+    "content": [{"type": "text", "text": "M  README.md\n"}],
+    "isError": false,
+    "metadata": {"exitCode": 0, "stderr": ""}
+  }
 }
 ```
 
 **Error Response:**
 ```json
 {
-  "error": "arguments not in allowed patterns"
+  "jsonrpc": "2.0",
+  "id": 3,
+  "error": {
+    "code": -32001,
+    "message": "Arguments denied by policy",
+    "data": "Args not in allowed patterns"
+  }
 }
 ```
 
-### MCP Protocol (stdio)
+### HTTP Authentication
 
-The server dynamically generates MCP tools from the database. Each tool registered for the API key becomes available as an MCP tool.
+HTTP mode requires Bearer token authentication:
 
-**Tool Input Schema:**
-```json
-{
-  "type": "object",
-  "properties": {
-    "cwd": {
-      "type": "string",
-      "description": "Working directory for the command"
-    },
-    "args": {
-      "type": "array",
-      "items": { "type": "string" },
-      "description": "Command arguments"
-    }
-  },
-  "required": ["cwd"]
-}
+```
+Authorization: Bearer your-api-key
 ```
 
 ## TUI Admin Tool

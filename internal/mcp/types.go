@@ -144,8 +144,15 @@ type CallToolParams struct {
 
 // CallToolResult represents the result of tools/call request
 type CallToolResult struct {
-	Content []Content `json:"content"`
-	IsError bool      `json:"isError,omitempty"`
+	Content  []Content        `json:"content"`
+	IsError  bool             `json:"isError,omitempty"`
+	Metadata *ResultMetadata  `json:"metadata,omitempty"`
+}
+
+// ResultMetadata contains execution metadata
+type ResultMetadata struct {
+	ExitCode int    `json:"exitCode"`
+	Stderr   string `json:"stderr,omitempty"`
 }
 
 // Content represents content in tool result

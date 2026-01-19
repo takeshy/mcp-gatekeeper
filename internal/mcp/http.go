@@ -70,6 +70,7 @@ type HTTPServer struct {
 	executor    *executor.Executor
 	rateLimiter *RateLimiter
 	router      chi.Router
+	rootDir     string
 }
 
 // HTTPConfig holds HTTP server configuration
@@ -77,6 +78,7 @@ type HTTPConfig struct {
 	RateLimit       int
 	RateLimitWindow time.Duration
 	RootDir         string
+	WasmDir         string
 }
 
 // DefaultHTTPConfig returns the default HTTP configuration
@@ -97,6 +99,7 @@ func NewHTTPServer(database *db.DB, config *HTTPConfig) *HTTPServer {
 		Timeout:   executor.DefaultTimeout,
 		MaxOutput: executor.DefaultMaxOutput,
 		RootDir:   config.RootDir,
+		WasmDir:   config.WasmDir,
 	}
 
 	s := &HTTPServer{
@@ -105,6 +108,7 @@ func NewHTTPServer(database *db.DB, config *HTTPConfig) *HTTPServer {
 		evaluator:   policy.NewEvaluator(),
 		executor:    executor.NewExecutor(execConfig),
 		rateLimiter: NewRateLimiter(config.RateLimit, config.RateLimitWindow),
+		rootDir:     config.RootDir,
 	}
 
 	s.setupRoutes()
@@ -122,11 +126,10 @@ func (s *HTTPServer) setupRoutes() {
 	// Health check
 	r.Get("/health", s.handleHealth)
 
-	// API v1 routes
-	r.Route("/v1", func(r chi.Router) {
+	// MCP JSON-RPC endpoint (with auth)
+	r.Group(func(r chi.Router) {
 		r.Use(s.authMiddleware)
-		r.Get("/tools", s.handleListTools)
-		r.Post("/tools/{toolName}", s.handleToolCall)
+		r.Post("/mcp", s.handleMCP)
 	})
 
 	s.router = r
@@ -184,108 +187,161 @@ func (s *HTTPServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// ToolListResponse represents the list tools response
-type ToolListResponse struct {
-	Tools []ToolInfo `json:"tools"`
-}
-
-// ToolInfo represents tool information in the list response
-type ToolInfo struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Command     string `json:"command"`
-	Sandbox     string `json:"sandbox"`
-}
-
-func (s *HTTPServer) handleListTools(w http.ResponseWriter, r *http.Request) {
+// handleMCP handles MCP JSON-RPC requests
+func (s *HTTPServer) handleMCP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	apiKey := apiKeyFromContext(ctx)
 
-	tools, err := s.db.ListToolsByAPIKeyID(apiKey.ID)
-	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to list tools: %v", err))
+	var req Request
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fmt.Fprintf(os.Stderr, "[ERROR] Failed to parse JSON-RPC request: %v\n", err)
+		s.writeJSONRPC(w, NewErrorResponse(nil, ParseError, "Parse error", err.Error()))
 		return
 	}
 
-	response := ToolListResponse{
-		Tools: make([]ToolInfo, len(tools)),
+	if req.JSONRPC != "2.0" {
+		s.writeJSONRPC(w, NewErrorResponse(req.ID, InvalidRequest, "Invalid Request", "jsonrpc must be 2.0"))
+		return
 	}
-	for i, t := range tools {
-		response.Tools[i] = ToolInfo{
+
+	// Handle notifications (no id or null id) - don't send response
+	if req.ID == nil || string(req.ID) == "null" {
+		s.handleMCPNotification(&req)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	var resp *Response
+	switch req.Method {
+	case "initialize":
+		resp = s.handleMCPInitialize(&req)
+	case "tools/list":
+		resp = s.handleMCPToolsList(apiKey, &req)
+	case "tools/call":
+		resp = s.handleMCPToolsCall(ctx, apiKey, &req)
+	case "ping":
+		resp = NewResponse(req.ID, struct{}{})
+	default:
+		resp = NewErrorResponse(req.ID, MethodNotFound, "Method not found", req.Method)
+	}
+
+	s.writeJSONRPC(w, resp)
+}
+
+// handleMCPNotification handles MCP notifications (no response expected)
+func (s *HTTPServer) handleMCPNotification(req *Request) {
+	switch req.Method {
+	case "notifications/initialized":
+		// Client is initialized, nothing to do
+	case "notifications/cancelled":
+		// Request cancellation, nothing to do for now
+	default:
+		fmt.Fprintf(os.Stderr, "[WARN] Unknown notification: %s\n", req.Method)
+	}
+}
+
+func (s *HTTPServer) handleMCPInitialize(req *Request) *Response {
+	result := &InitializeResult{
+		ProtocolVersion: ProtocolVersion,
+		Capabilities: ServerCapabilities{
+			Tools: &ToolsCapability{
+				ListChanged: false,
+			},
+		},
+		ServerInfo: ServerInfo{
+			Name:    ServerName,
+			Version: ServerVersion,
+		},
+	}
+	return NewResponse(req.ID, result)
+}
+
+func (s *HTTPServer) handleMCPToolsList(apiKey *db.APIKey, req *Request) *Response {
+	dbTools, err := s.db.ListToolsByAPIKeyID(apiKey.ID)
+	if err != nil {
+		return NewErrorResponse(req.ID, InternalError, "Failed to list tools", err.Error())
+	}
+
+	tools := make([]Tool, len(dbTools))
+	for i, t := range dbTools {
+		tools[i] = Tool{
 			Name:        t.Name,
 			Description: t.Description,
-			Command:     t.Command,
-			Sandbox:     string(t.Sandbox),
+			InputSchema: InputSchema{
+				Type: "object",
+				Properties: map[string]Property{
+					"cwd": {
+						Type:        "string",
+						Description: "Working directory for the command (defaults to root directory)",
+					},
+					"args": {
+						Type:        "array",
+						Description: "Command arguments",
+						Items:       &Items{Type: "string"},
+					},
+				},
+				Required: []string{},
+			},
+		}
+	}
+	return NewResponse(req.ID, &ListToolsResult{Tools: tools})
+}
+
+func (s *HTTPServer) handleMCPToolsCall(ctx context.Context, apiKey *db.APIKey, req *Request) *Response {
+	var params CallToolParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, InvalidParams, "Invalid params", err.Error())
+	}
+
+	// Look up tool by name for this API key
+	tool, err := s.db.GetToolByAPIKeyAndName(apiKey.ID, params.Name)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[ERROR] Failed to get tool: %v\n", err)
+		return NewErrorResponse(req.ID, InternalError, "Failed to get tool", err.Error())
+	}
+	if tool == nil {
+		fmt.Fprintf(os.Stderr, "[ERROR] Tool not found: %s for apiKey=%s\n", params.Name, apiKey.Name)
+		return NewErrorResponse(req.ID, MethodNotFound, "Tool not found", params.Name)
+	}
+
+	// Parse arguments
+	cwd, _ := params.Arguments["cwd"].(string)
+	var cmdArgs []string
+	if argsRaw, ok := params.Arguments["args"].([]interface{}); ok {
+		for _, a := range argsRaw {
+			if str, ok := a.(string); ok {
+				cmdArgs = append(cmdArgs, str)
+			}
 		}
 	}
 
-	s.writeJSON(w, http.StatusOK, response)
-}
+	// Default cwd to rootDir if not provided
+	if cwd == "" {
+		cwd = s.rootDir
+	}
 
-// ToolCallRequest represents the tool call request
-type ToolCallRequest struct {
-	Cwd  string   `json:"cwd"`
-	Args []string `json:"args,omitempty"`
-}
-
-// ToolCallResponse represents the tool call response
-type ToolCallResponse struct {
-	ExitCode   int    `json:"exit_code"`
-	Stdout     string `json:"stdout"`
-	Stderr     string `json:"stderr"`
-	DurationMs int64  `json:"duration_ms"`
-}
-
-func (s *HTTPServer) handleToolCall(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	apiKey := apiKeyFromContext(ctx)
-	toolName := chi.URLParam(r, "toolName")
-
-	// Get tool
-	tool, err := s.db.GetToolByAPIKeyAndName(apiKey.ID, toolName)
+	// Evaluate policy (check if args are allowed)
+	decision, err := s.evaluator.EvaluateArgs(tool, cmdArgs)
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to get tool: %v", err))
-		return
-	}
-	if tool == nil {
-		s.writeError(w, http.StatusNotFound, fmt.Sprintf("tool not found: %s", toolName))
-		return
-	}
-
-	var req ToolCallRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "invalid JSON")
-		return
-	}
-
-	if req.Cwd == "" {
-		s.writeError(w, http.StatusBadRequest, "cwd is required")
-		return
-	}
-
-	// Evaluate policy
-	decision, err := s.evaluator.EvaluateArgs(tool, req.Args)
-	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("policy evaluation failed: %v", err))
-		return
+		return NewErrorResponse(req.ID, InternalError, "Policy evaluation failed", err.Error())
 	}
 
 	// Create audit log
 	auditLog := &db.AuditLog{
 		APIKeyID:          apiKey.ID,
-		RequestedCwd:      req.Cwd,
+		RequestedCwd:      cwd,
 		RequestedCmd:      tool.Command,
-		RequestedArgs:     req.Args,
-		NormalizedCwd:     req.Cwd,
-		NormalizedCmdline: tool.Command + " " + strings.Join(req.Args, " "),
+		RequestedArgs:     cmdArgs,
+		NormalizedCwd:     cwd,
+		NormalizedCmdline: tool.Command + " " + strings.Join(cmdArgs, " "),
 		MatchedRules:      decision.MatchedRules,
 	}
 
 	if !decision.Allowed {
+		fmt.Fprintf(os.Stderr, "[WARN] Arguments denied by policy: %s\n", decision.Reason)
 		auditLog.Decision = db.DecisionDeny
 		s.db.CreateAuditLog(auditLog)
-		s.writeError(w, http.StatusForbidden, fmt.Sprintf("arguments denied by policy: %s", decision.Reason))
-		return
+		return NewErrorResponse(req.ID, PolicyDenied, "Arguments denied by policy", decision.Reason)
 	}
 
 	auditLog.Decision = db.DecisionAllow
@@ -295,12 +351,12 @@ func (s *HTTPServer) handleToolCall(w http.ResponseWriter, r *http.Request) {
 	filteredEnv := filterEnvByKeys(os.Environ(), filteredEnvKeys)
 
 	// Execute command using the tool's sandbox setting
-	result, err := s.executor.ExecuteWithSandbox(ctx, req.Cwd, tool.Command, req.Args, filteredEnv, tool.Sandbox, tool.WasmBinary)
+	result, err := s.executor.ExecuteWithSandbox(ctx, cwd, tool.Command, cmdArgs, filteredEnv, tool.Sandbox, tool.WasmBinary)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "[ERROR] Execution failed: %v\n", err)
 		auditLog.Stderr = err.Error()
 		s.db.CreateAuditLog(auditLog)
-		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("execution failed: %v", err))
-		return
+		return NewErrorResponse(req.ID, ExecutionFailed, "Execution failed", err.Error())
 	}
 
 	// Update audit log with result
@@ -312,14 +368,28 @@ func (s *HTTPServer) handleToolCall(w http.ResponseWriter, r *http.Request) {
 	auditLog.DurationMs.Valid = true
 	s.db.CreateAuditLog(auditLog)
 
-	// Return response
-	resp := &ToolCallResponse{
-		ExitCode:   result.ExitCode,
-		Stdout:     result.Stdout,
-		Stderr:     result.Stderr,
-		DurationMs: result.DurationMs,
+	// Return MCP-formatted result
+	content := []Content{
+		{
+			Type: "text",
+			Text: result.Stdout,
+		},
 	}
-	s.writeJSON(w, http.StatusOK, resp)
+
+	return NewResponse(req.ID, &CallToolResult{
+		Content: content,
+		IsError: result.ExitCode != 0,
+		Metadata: &ResultMetadata{
+			ExitCode: result.ExitCode,
+			Stderr:   result.Stderr,
+		},
+	})
+}
+
+func (s *HTTPServer) writeJSONRPC(w http.ResponseWriter, resp *Response) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (s *HTTPServer) writeJSON(w http.ResponseWriter, status int, data interface{}) {

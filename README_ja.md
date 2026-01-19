@@ -17,9 +17,9 @@
 - **ディレクトリサンドボックス**: 必須の`--root-dir`オプションにより、すべての操作を指定ディレクトリに制限
 - **ツールごとのサンドボックス選択**: 各ツールは`none`、`bubblewrap`、`wasm`のサンドボックスを使用可能
 - **Bubblewrapサンドボックス**: `bwrap`統合による真のプロセス分離
-- **WASMサンドボックス**: 安全なwazeroランタイムでWebAssemblyバイナリを実行
+- **WASMサンドボックス**: 安全なwazeroランタイムでWebAssemblyバイナリを実行（モジュールキャッシュ付き）
 - **動的ツール登録**: TUIを通じてAPIキーごとにカスタムツールを定義
-- **デュアルプロトコル対応**: stdio（MCP用JSON-RPC）とHTTP APIの両モードをサポート
+- **デュアルプロトコル対応**: stdioとHTTPの両モードでMCP JSON-RPCプロトコルを使用
 - **TUI管理ツール**: キー、ツール、ログを管理するインタラクティブなターミナルインターフェース
 - **監査ログ**: すべてのコマンドリクエストと実行結果の完全なログ記録
 - **レート制限**: HTTP API用の設定可能なレート制限（デフォルト: 500リクエスト/分）
@@ -86,6 +86,16 @@ APIキー詳細画面で：
   --db=gatekeeper.db
 ```
 
+**WASMディレクトリを指定（外部WASMバイナリ用）：**
+```bash
+./mcp-gatekeeper-server \
+  --root-dir=/home/user/projects \
+  --wasm-dir=/opt \
+  --mode=http \
+  --addr=:8080 \
+  --db=gatekeeper.db
+```
+
 **stdioモード（MCPクライアント用）：**
 ```bash
 MCP_GATEKEEPER_API_KEY=your-api-key \
@@ -97,17 +107,25 @@ MCP_GATEKEEPER_API_KEY=your-api-key \
 
 ### 5. 実行テスト
 
-curlを使用（HTTPモード）：
+MCP JSON-RPCプロトコルでcurlを使用（HTTPモード）：
 ```bash
-# 利用可能なツールを一覧表示
-curl http://localhost:8080/v1/tools \
-  -H "Authorization: Bearer your-api-key"
-
-# ツールを呼び出し
-curl -X POST http://localhost:8080/v1/tools/git \
+# 初期化
+curl -X POST http://localhost:8080/mcp \
   -H "Authorization: Bearer your-api-key" \
   -H "Content-Type: application/json" \
-  -d '{"cwd": "/home/user/projects", "args": ["status", "--short"]}'
+  -d '{"jsonrpc": "2.0", "id": 1, "method": "initialize"}'
+
+# 利用可能なツールを一覧表示
+curl -X POST http://localhost:8080/mcp \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "id": 2, "method": "tools/list"}'
+
+# ツールを呼び出し
+curl -X POST http://localhost:8080/mcp \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "git", "arguments": {"cwd": "/home/user/projects", "args": ["status", "--short"]}}}'
 ```
 
 ## 設定
@@ -117,6 +135,7 @@ curl -X POST http://localhost:8080/v1/tools/git \
 | オプション | デフォルト | 説明 |
 |-----------|-----------|------|
 | `--root-dir` | (必須) | コマンド実行のルートディレクトリ（サンドボックス） |
+| `--wasm-dir` | - | WASMバイナリを格納するディレクトリ（WASMサンドボックス内で`/.wasm`としてマウント） |
 | `--mode` | `stdio` | サーバーモード: `stdio` または `http` |
 | `--db` | `gatekeeper.db` | SQLiteデータベースパス |
 | `--addr` | `:8080` | HTTPサーバーアドレス（httpモード用） |
@@ -135,6 +154,19 @@ curl -X POST http://localhost:8080/v1/tools/git \
 - コマンドはルートディレクトリ外のパスにアクセスできません
 - シンボリックリンクは脱出を防ぐために解決されます
 - このオプションなしでサーバーは起動しません
+
+### WASMディレクトリ (--wasm-dir)
+
+`--wasm-dir`オプションにより、WASMバイナリをルートディレクトリ外に配置できます：
+
+```bash
+# WASMバイナリは/opt、作業ディレクトリは/home/user/projects
+./mcp-gatekeeper-server --root-dir=/home/user/projects --wasm-dir=/opt --mode=http
+```
+
+- WASMバイナリはWASMサンドボックス内で`/.wasm`としてマウントされます
+- 作業ディレクトリ（`--root-dir`）はWASMサンドボックス内で`/`としてマウントされます
+- これにより、WASMランタイムとユーザーデータを分離できます
 
 ### ツール設定
 
@@ -187,6 +219,7 @@ sudo pacman -S bubblewrap
 - wazeroランタイムで実行（純粋なGo、CGO不要）
 - ファイルシステムアクセスはルートディレクトリに制限
 - ネットワークアクセスなし
+- **コンパイル済みモジュールがキャッシュ**され、2回目以降の実行が高速化
 
 **WASMバイナリの作成：**
 
@@ -236,26 +269,39 @@ tar xzf ruby-*-wasm32-unknown-wasip1-full.tar.gz
 
 *Python (python.wasm)：*
 ```bash
-# https://github.com/nickstenning/python-wasm/releases からダウンロード、またはソースからビルド
-# 使用: python.wasm
+# VMware Labs WebAssembly Language Runtimes からダウンロード
+# https://github.com/vmware-labs/webassembly-language-runtimes/releases
+# python-*.wasm リリースを探す
+curl -LO "https://github.com/vmware-labs/webassembly-language-runtimes/releases/download/python/3.12.0%2B20231211-040d5a6/python-3.12.0.wasm"
+# 使用: python-3.12.0.wasm（標準ライブラリ内蔵、約26MB）
 ```
 
-*Node.jsはWASIで利用不可、代わりにQuickJSを使用：*
+*JavaScript (QuickJS)：*
 ```bash
-# https://nickstenning.github.io/verless-quickjs-wasm/ からダウンロード
-# または https://github.com/nickstenning/verless-quickjs-wasm からビルド
-curl -LO https://nickstenning.github.io/verless-quickjs-wasm/quickjs.wasm
-# 使用: quickjs.wasm
+# QuickJS-NG リリースからダウンロード
+# https://github.com/quickjs-ng/quickjs/releases
+curl -LO "https://github.com/quickjs-ng/quickjs/releases/latest/download/qjs-wasi.wasm"
+# 使用: qjs-wasi.wasm（約1.4MB、JSONは組み込み）
 ```
+
+**WASMランタイム比較：**
+
+| ランタイム | サイズ | コンパイル時間 | JSONサポート |
+|-----------|--------|--------------|--------------|
+| Ruby | 約50MB（stdlib含む） | 約9秒 | `require 'json'`（自動設定） |
+| Python | 約26MB（内蔵） | 約3.6秒 | `import json`（組み込み） |
+| QuickJS | 約1.4MB | 約0.5秒 | `JSON.stringify()`（組み込み） |
+
+注: コンパイル時間は初回実行時のみです。コンパイル済みモジュールはキャッシュされ、2回目以降は高速に実行されます。
 
 **WASMツールの設定：**
 
 TUIでツールを作成する際：
-- **Name**: `my-tool`
-- **Description**: `My WASM tool`
-- **Command**: `my-tool`（任意の値、WASMでは使用されない）
+- **Name**: `ruby`
+- **Description**: `Execute Ruby scripts in WASM sandbox`
+- **Command**: `ruby`（任意の値、WASMでは使用されない）
 - **Sandbox**: `wasm`
-- **WASM Binary**: `/path/to/my-tool.wasm`
+- **WASM Binary**: `/opt/ruby-wasm/usr/local/bin/ruby`
 
 WASMバイナリはWASIの`args_get`経由で引数を受け取り、ルートディレクトリ内のファイルにアクセスできます。
 
@@ -279,88 +325,117 @@ WASMバイナリはWASIの`args_get`経由で引数を受け取り、ルート�
 
 ## APIリファレンス
 
-### HTTP API
+### MCP JSON-RPCプロトコル
 
-#### GET /v1/tools
+stdioとHTTPの両モードでMCP JSON-RPC 2.0プロトコルを使用します。HTTPモードは`POST /mcp`でリクエストを受け付けます。
+
+#### initialize
+
+MCPセッションを初期化します。
+
+**リクエスト：**
+```json
+{"jsonrpc": "2.0", "id": 1, "method": "initialize"}
+```
+
+**レスポンス：**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "protocolVersion": "2024-11-05",
+    "capabilities": {"tools": {}},
+    "serverInfo": {"name": "mcp-gatekeeper", "version": "1.0.0"}
+  }
+}
+```
+
+#### tools/list
 
 認証されたAPIキーで利用可能なツールを一覧表示します。
 
-**ヘッダー：**
-- `Authorization: Bearer <api-key>`（必須）
+**リクエスト：**
+```json
+{"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
+```
 
 **レスポンス：**
 ```json
 {
-  "tools": [
-    {
-      "name": "git",
-      "description": "Run git commands",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "cwd": {"type": "string", "description": "作業ディレクトリ"},
-          "args": {"type": "array", "items": {"type": "string"}, "description": "コマンド引数"}
-        },
-        "required": ["cwd"]
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "tools": [
+      {
+        "name": "git",
+        "description": "Run git commands",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "cwd": {"type": "string", "description": "コマンドの作業ディレクトリ（デフォルトはルートディレクトリ）"},
+            "args": {"type": "array", "items": {"type": "string"}, "description": "コマンド引数"}
+          },
+          "required": []
+        }
       }
-    }
-  ]
+    ]
+  }
 }
 ```
 
-#### POST /v1/tools/{toolName}
+#### tools/call
 
 ツールを実行します。
 
-**ヘッダー：**
-- `Authorization: Bearer <api-key>`（必須）
-
-**リクエストボディ：**
+**リクエスト：**
 ```json
 {
-  "cwd": "/path/to/directory",
-  "args": ["arg1", "arg2"]
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "git",
+    "arguments": {
+      "cwd": "/path/to/directory",
+      "args": ["status", "--short"]
+    }
+  }
 }
 ```
 
 **レスポンス：**
 ```json
 {
-  "exit_code": 0,
-  "stdout": "output...",
-  "stderr": "",
-  "duration_ms": 45
+  "jsonrpc": "2.0",
+  "id": 3,
+  "result": {
+    "content": [{"type": "text", "text": "M  README.md\n"}],
+    "isError": false,
+    "metadata": {"exitCode": 0, "stderr": ""}
+  }
 }
 ```
 
 **エラーレスポンス：**
 ```json
 {
-  "error": "arguments not in allowed patterns"
+  "jsonrpc": "2.0",
+  "id": 3,
+  "error": {
+    "code": -32001,
+    "message": "Arguments denied by policy",
+    "data": "Args not in allowed patterns"
+  }
 }
 ```
 
-### MCPプロトコル（stdio）
+### HTTP認証
 
-サーバーはデータベースからMCPツールを動的に生成します。APIキーに登録された各ツールがMCPツールとして利用可能になります。
+HTTPモードではBearerトークン認証が必要です：
 
-**ツール入力スキーマ：**
-```json
-{
-  "type": "object",
-  "properties": {
-    "cwd": {
-      "type": "string",
-      "description": "コマンドの作業ディレクトリ"
-    },
-    "args": {
-      "type": "array",
-      "items": { "type": "string" },
-      "description": "コマンド引数"
-    }
-  },
-  "required": ["cwd"]
-}
+```
+Authorization: Bearer your-api-key
 ```
 
 ## TUI管理ツール

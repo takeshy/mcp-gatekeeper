@@ -25,6 +25,7 @@ type ExecutorConfig struct {
 	Timeout   time.Duration
 	MaxOutput int
 	RootDir   string // If set, restricts execution to this directory (jail/sandbox)
+	WasmDir   string // Optional: directory containing WASM binaries (mounted as /.wasm)
 }
 
 // DefaultConfig returns the default executor configuration
@@ -76,7 +77,7 @@ func NewExecutor(config *ExecutorConfig) *Executor {
 		}
 
 		// Initialize WASM executor
-		e.wasmExecutor = NewWasmExecutor(config.RootDir)
+		e.wasmExecutor = NewWasmExecutor(config.RootDir, config.WasmDir)
 	}
 
 	return e

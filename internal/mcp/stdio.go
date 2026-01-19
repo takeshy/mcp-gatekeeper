@@ -35,7 +35,7 @@ type StdioServer struct {
 }
 
 // NewStdioServer creates a new stdio MCP server
-func NewStdioServer(database *db.DB, apiKeyStr string, rootDir string) (*StdioServer, error) {
+func NewStdioServer(database *db.DB, apiKeyStr string, rootDir string, wasmDir string) (*StdioServer, error) {
 	authenticator := auth.NewAuthenticator(database)
 
 	// Authenticate API key
@@ -51,6 +51,7 @@ func NewStdioServer(database *db.DB, apiKeyStr string, rootDir string) (*StdioSe
 		Timeout:   executor.DefaultTimeout,
 		MaxOutput: executor.DefaultMaxOutput,
 		RootDir:   rootDir,
+		WasmDir:   wasmDir,
 	}
 
 	return &StdioServer{
@@ -185,7 +186,7 @@ func (s *StdioServer) handleToolsList(req *Request) (*Response, error) {
 				Properties: map[string]Property{
 					"cwd": {
 						Type:        "string",
-						Description: "Working directory for the command",
+						Description: "Working directory for the command (defaults to root directory)",
 					},
 					"args": {
 						Type:        "array",
@@ -193,7 +194,7 @@ func (s *StdioServer) handleToolsList(req *Request) (*Response, error) {
 						Items:       &Items{Type: "string"},
 					},
 				},
-				Required: []string{"cwd"},
+				Required: []string{},
 			},
 		}
 	}
@@ -203,15 +204,18 @@ func (s *StdioServer) handleToolsList(req *Request) (*Response, error) {
 func (s *StdioServer) handleToolsCall(ctx context.Context, req *Request) (*Response, error) {
 	var params CallToolParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
+		fmt.Fprintf(os.Stderr, "[ERROR] Invalid params: %v\n", err)
 		return NewErrorResponse(req.ID, InvalidParams, "Invalid params", err.Error()), nil
 	}
 
 	// Look up tool by name for this API key
 	tool, err := s.db.GetToolByAPIKeyAndName(s.apiKey.ID, params.Name)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "[ERROR] Failed to get tool: %v\n", err)
 		return NewErrorResponse(req.ID, InternalError, "Failed to get tool", err.Error()), nil
 	}
 	if tool == nil {
+		fmt.Fprintf(os.Stderr, "[ERROR] Tool not found: %s for apiKey=%s\n", params.Name, s.apiKey.Name)
 		return NewErrorResponse(req.ID, MethodNotFound, "Tool not found", params.Name), nil
 	}
 
@@ -230,8 +234,9 @@ func (s *StdioServer) handleExecute(ctx context.Context, id json.RawMessage, too
 		}
 	}
 
+	// Default cwd to rootDir if not provided
 	if cwd == "" {
-		return NewErrorResponse(id, InvalidParams, "cwd is required", nil), nil
+		cwd = s.rootDir
 	}
 
 	// Evaluate policy (check if args are allowed)
@@ -252,6 +257,7 @@ func (s *StdioServer) handleExecute(ctx context.Context, id json.RawMessage, too
 	}
 
 	if !decision.Allowed {
+		fmt.Fprintf(os.Stderr, "[WARN] Arguments denied by policy: %s\n", decision.Reason)
 		auditLog.Decision = db.DecisionDeny
 		s.db.CreateAuditLog(auditLog)
 		return NewErrorResponse(id, PolicyDenied, "Arguments denied by policy", decision.Reason), nil
@@ -266,6 +272,7 @@ func (s *StdioServer) handleExecute(ctx context.Context, id json.RawMessage, too
 	// Execute command using the tool's sandbox setting
 	result, err := s.executor.ExecuteWithSandbox(ctx, cwd, tool.Command, cmdArgs, filteredEnv, tool.Sandbox, tool.WasmBinary)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "[ERROR] Execution failed: %v\n", err)
 		auditLog.Stderr = err.Error()
 		s.db.CreateAuditLog(auditLog)
 		return NewErrorResponse(id, ExecutionFailed, "Execution failed", err.Error()), nil
@@ -281,23 +288,20 @@ func (s *StdioServer) handleExecute(ctx context.Context, id json.RawMessage, too
 	s.db.CreateAuditLog(auditLog)
 
 	// Return result
-	execResult := &ExecuteResult{
-		ExitCode: result.ExitCode,
-		Stdout:   result.Stdout,
-		Stderr:   result.Stderr,
-	}
-
 	content := []Content{
 		{
 			Type: "text",
-			Text: fmt.Sprintf("Exit code: %d\n\nStdout:\n%s\n\nStderr:\n%s",
-				execResult.ExitCode, execResult.Stdout, execResult.Stderr),
+			Text: result.Stdout,
 		},
 	}
 
 	return NewResponse(id, &CallToolResult{
 		Content: content,
 		IsError: result.ExitCode != 0,
+		Metadata: &ResultMetadata{
+			ExitCode: result.ExitCode,
+			Stderr:   result.Stderr,
+		},
 	}), nil
 }
 
