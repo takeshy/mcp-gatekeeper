@@ -13,19 +13,26 @@ import (
 
 	"github.com/takeshy/mcp-gatekeeper/internal/db"
 	"github.com/takeshy/mcp-gatekeeper/internal/mcp"
+	"github.com/takeshy/mcp-gatekeeper/internal/version"
 )
 
 func main() {
 	var (
-		mode      = flag.String("mode", "stdio", "Server mode: stdio or http")
-		dbPath    = flag.String("db", "gatekeeper.db", "SQLite database path")
-		addr      = flag.String("addr", ":8080", "HTTP server address (for http mode)")
-		apiKey    = flag.String("api-key", "", "API key for stdio mode (or MCP_GATEKEEPER_API_KEY env var)")
-		rateLimit = flag.Int("rate-limit", 500, "Rate limit per API key per minute (for http mode)")
-		rootDir   = flag.String("root-dir", "", "Root directory for command execution (required, acts as chroot)")
-		wasmDir   = flag.String("wasm-dir", "", "Directory containing WASM binaries (mounted as /.wasm in WASM sandbox)")
+		showVersion = flag.Bool("version", false, "Show version and exit")
+		mode        = flag.String("mode", "stdio", "Server mode: stdio or http")
+		dbPath      = flag.String("db", "gatekeeper.db", "SQLite database path")
+		addr        = flag.String("addr", ":8080", "HTTP server address (for http mode)")
+		apiKey      = flag.String("api-key", "", "API key for stdio mode (or MCP_GATEKEEPER_API_KEY env var)")
+		rateLimit   = flag.Int("rate-limit", 500, "Rate limit per API key per minute (for http mode)")
+		rootDir     = flag.String("root-dir", "", "Root directory for command execution (required, acts as chroot)")
+		wasmDir     = flag.String("wasm-dir", "", "Directory containing WASM binaries (mounted as /.wasm in WASM sandbox)")
 	)
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("mcp-gatekeeper %s\n", version.Version)
+		os.Exit(0)
+	}
 
 	// Validate required root-dir
 	if *rootDir == "" {

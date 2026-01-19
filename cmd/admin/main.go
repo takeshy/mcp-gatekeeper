@@ -9,13 +9,20 @@ import (
 
 	"github.com/takeshy/mcp-gatekeeper/internal/db"
 	"github.com/takeshy/mcp-gatekeeper/internal/tui"
+	"github.com/takeshy/mcp-gatekeeper/internal/version"
 )
 
 func main() {
 	var (
-		dbPath = flag.String("db", "gatekeeper.db", "SQLite database path")
+		showVersion = flag.Bool("version", false, "Show version and exit")
+		dbPath      = flag.String("db", "gatekeeper.db", "SQLite database path")
 	)
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("mcp-gatekeeper-admin %s\n", version.Version)
+		os.Exit(0)
+	}
 
 	// Open database
 	database, err := db.Open(*dbPath)

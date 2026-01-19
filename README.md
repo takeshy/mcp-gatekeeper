@@ -157,13 +157,21 @@ go install github.com/takeshy/mcp-gatekeeper/cmd/server@latest
 go install github.com/takeshy/mcp-gatekeeper/cmd/admin@latest
 ```
 
+Or download from [Releases](https://github.com/takeshy/mcp-gatekeeper/releases).
+
 Or build from source:
 
 ```bash
 git clone https://github.com/takeshy/mcp-gatekeeper
 cd mcp-gatekeeper
-go build -o mcp-gatekeeper-server ./cmd/server
-go build -o mcp-gatekeeper-admin ./cmd/admin
+make build
+```
+
+Check version:
+
+```bash
+./mcp-gatekeeper --version
+./mcp-gatekeeper-admin --version
 ```
 
 ## Quick Start
@@ -610,9 +618,29 @@ The admin tool provides:
 
 ## Development
 
+### Build Commands
+
+```bash
+make build    # Build mcp-gatekeeper and mcp-gatekeeper-admin
+make test     # Run tests
+make clean    # Remove build artifacts
+make release  # Build for all platforms (linux/darwin/windows, amd64/arm64)
+```
+
+### Database
+
+The database is automatically created and migrated on startup:
+
+- If `gatekeeper.db` doesn't exist, it will be created
+- Migrations in `internal/db/migrations/*.sql` are applied automatically
+- Schema version is tracked in `schema_migrations` table
+- When upgrading to a new release, just run the new binary - schema changes are applied automatically
+
 ### Running Tests
 
 ```bash
+make test
+# or
 go test ./...
 ```
 

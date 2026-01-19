@@ -156,13 +156,21 @@ go install github.com/takeshy/mcp-gatekeeper/cmd/server@latest
 go install github.com/takeshy/mcp-gatekeeper/cmd/admin@latest
 ```
 
+または[Releases](https://github.com/takeshy/mcp-gatekeeper/releases)からダウンロード。
+
 またはソースからビルド：
 
 ```bash
 git clone https://github.com/takeshy/mcp-gatekeeper
 cd mcp-gatekeeper
-go build -o mcp-gatekeeper-server ./cmd/server
-go build -o mcp-gatekeeper-admin ./cmd/admin
+make build
+```
+
+バージョン確認：
+
+```bash
+./mcp-gatekeeper --version
+./mcp-gatekeeper-admin --version
 ```
 
 ## クイックスタート
@@ -609,9 +617,29 @@ Authorization: Bearer your-api-key
 
 ## 開発
 
+### ビルドコマンド
+
+```bash
+make build    # mcp-gatekeeper と mcp-gatekeeper-admin をビルド
+make test     # テストを実行
+make clean    # ビルド成果物を削除
+make release  # 全プラットフォーム向けビルド (linux/darwin/windows, amd64/arm64)
+```
+
+### データベース
+
+データベースは起動時に自動で作成・マイグレーションされます：
+
+- `gatekeeper.db` が存在しない場合、自動作成
+- `internal/db/migrations/*.sql` のマイグレーションが自動適用
+- スキーマバージョンは `schema_migrations` テーブルで追跡
+- 新しいリリースにアップグレードする際は、新しいバイナリを実行するだけでスキーマ変更が自動適用
+
 ### テストの実行
 
 ```bash
+make test
+# または
 go test ./...
 ```
 

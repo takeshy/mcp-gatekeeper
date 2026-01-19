@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Update version in Makefile
+        run: |
+          VERSION=${{ github.ref_name }}
+          VERSION=${VERSION#v}
+          sed -i "s/^VERSION=.*/VERSION=${VERSION}/" Makefile
+
+      - name: Build release binaries
+        run: make release
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          # Get previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -z "$PREV_TAG" ]; then
+            # First release - get all commits
+            NOTES=$(git log --pretty=format:"- %s" HEAD)
+          else
+            # Get commits since previous tag
+            NOTES=$(git log --pretty=format:"- %s" ${PREV_TAG}..HEAD)
+          fi
+          # Escape for GitHub Actions
+          echo "notes<<EOF" >> $GITHUB_OUTPUT
+          echo "$NOTES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          draft: true
+          body: |
+            ## Changes
+            ${{ steps.notes.outputs.notes }}
+          files: |
+            dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
