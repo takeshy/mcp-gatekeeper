@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // SandboxMode represents the sandboxing mode
@@ -116,22 +117,27 @@ func (s *Sandbox) WrapCommand(cwd, cmd string, args []string) (string, []string,
 }
 
 // wrapWithBwrap creates bwrap command arguments
+// rootDir is mounted as / inside the sandbox (same as WASM)
 func (s *Sandbox) wrapWithBwrap(cwd, cmd string, args []string) (string, []string, error) {
+	// Convert cwd from host path to sandbox path (relative to rootDir -> /)
+	sandboxCwd := s.toSandboxPath(cwd)
+
 	// Build bwrap arguments
+	// Mount rootDir as / first, then overlay system directories
 	bwrapArgs := []string{
-		// Read-only bind mounts for system directories
+		// Mount rootDir as root filesystem
+		"--bind", s.rootDir, "/",
+		// Read-only bind mounts for system directories (overlay on top of /)
 		"--ro-bind", "/usr", "/usr",
 		"--ro-bind", "/bin", "/bin",
 		"--ro-bind", "/lib", "/lib",
 		"--ro-bind", "/lib64", "/lib64",
-		// Bind /etc read-only for basic system config (resolv.conf, etc.)
+		// Bind /etc read-only for basic system config
 		"--ro-bind", "/etc", "/etc",
-		// Writable bind mount for root directory
-		"--bind", s.rootDir, s.rootDir,
 		// Create minimal /tmp
 		"--tmpfs", "/tmp",
 		// Set working directory
-		"--chdir", cwd,
+		"--chdir", sandboxCwd,
 		// Unshare namespaces for isolation
 		"--unshare-user",
 		"--unshare-pid",
@@ -158,8 +164,8 @@ func (s *Sandbox) wrapWithBwrap(cwd, cmd string, args []string) (string, []strin
 		bwrapArgs = newArgs
 	}
 
-	// Add optional directories if they exist
-	optionalDirs := []string{"/sbin", "/opt"}
+	// Add optional directories if they exist (read-only for system tools)
+	optionalDirs := []string{"/sbin"}
 	for _, dir := range optionalDirs {
 		if _, err := os.Stat(dir); err == nil {
 			bwrapArgs = append(bwrapArgs, "--ro-bind", dir, dir)
@@ -171,6 +177,19 @@ func (s *Sandbox) wrapWithBwrap(cwd, cmd string, args []string) (string, []strin
 	bwrapArgs = append(bwrapArgs, args...)
 
 	return s.bwrap, bwrapArgs, nil
+}
+
+// toSandboxPath converts a host path to the corresponding sandbox path
+// Host rootDir maps to / inside the sandbox
+func (s *Sandbox) toSandboxPath(hostPath string) string {
+	if strings.HasPrefix(hostPath, s.rootDir) {
+		relative := strings.TrimPrefix(hostPath, s.rootDir)
+		if relative == "" || relative == "/" {
+			return "/"
+		}
+		return relative
+	}
+	return hostPath
 }
 
 // validatePath checks if a path is within the root directory
