@@ -1,7 +1,7 @@
 BINARY_NAME=mcp-gatekeeper
 ADMIN_BINARY_NAME=mcp-gatekeeper-admin
 DIST_DIR=dist
-VERSION=0.1.0
+VERSION=0.2.0
 LDFLAGS=-ldflags "-X github.com/takeshy/mcp-gatekeeper/internal/version.Version=$(VERSION)"
 
 .PHONY: all clean build release test
