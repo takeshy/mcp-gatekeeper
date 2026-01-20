@@ -134,6 +134,8 @@ func (s *Sandbox) wrapWithBwrap(cwd, cmd string, args []string) (string, []strin
 		"--ro-bind", "/lib64", "/lib64",
 		// Bind /etc read-only for basic system config
 		"--ro-bind", "/etc", "/etc",
+		// Create minimal /dev (provides /dev/null, /dev/zero, /dev/urandom, etc.)
+		"--dev", "/dev",
 		// Create minimal /tmp
 		"--tmpfs", "/tmp",
 		// Set working directory

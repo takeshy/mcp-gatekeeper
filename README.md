@@ -213,7 +213,7 @@ In the API Key detail screen:
 
 **HTTP Mode:**
 ```bash
-./mcp-gatekeeper-server \
+./mcp-gatekeeper \
   --root-dir=/home/user/projects \
   --mode=http \
   --addr=:8080 \
@@ -222,7 +222,7 @@ In the API Key detail screen:
 
 **With WASM directory (for external WASM binaries):**
 ```bash
-./mcp-gatekeeper-server \
+./mcp-gatekeeper \
   --root-dir=/home/user/projects \
   --wasm-dir=/opt \
   --mode=http \
@@ -233,7 +233,7 @@ In the API Key detail screen:
 **Stdio Mode (for MCP clients):**
 ```bash
 MCP_GATEKEEPER_API_KEY=your-api-key \
-./mcp-gatekeeper-server \
+./mcp-gatekeeper \
   --root-dir=/home/user/projects \
   --mode=stdio \
   --db=gatekeeper.db
@@ -282,7 +282,7 @@ The `--root-dir` option is **required** and creates a chroot-like sandbox:
 
 ```bash
 # All commands restricted to /home/user/projects
-./mcp-gatekeeper-server --root-dir=/home/user/projects --mode=http
+./mcp-gatekeeper --root-dir=/home/user/projects --mode=http
 ```
 
 - Commands cannot access paths outside the root directory
@@ -295,7 +295,7 @@ The `--wasm-dir` option allows WASM binaries to be located outside the root dire
 
 ```bash
 # WASM binaries in /opt, working directory in /home/user/projects
-./mcp-gatekeeper-server --root-dir=/home/user/projects --wasm-dir=/opt --mode=http
+./mcp-gatekeeper --root-dir=/home/user/projects --wasm-dir=/opt --mode=http
 ```
 
 - WASM binaries are mounted as `/.wasm` inside the WASM sandbox
