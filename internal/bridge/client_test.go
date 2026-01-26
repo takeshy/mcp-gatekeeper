@@ -132,3 +132,115 @@ func TestResponseWithError(t *testing.T) {
 		t.Errorf("expected error message 'Invalid Request', got '%s'", parsed.Error.Message)
 	}
 }
+
+func TestResponseWithStringID(t *testing.T) {
+	resp := Response{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage(`"string-id-123"`),
+		Result:  json.RawMessage(`{"status":"ok"}`),
+	}
+
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("failed to marshal response: %v", err)
+	}
+
+	var parsed Response
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	// Verify the ID is preserved as-is
+	if string(parsed.ID) != `"string-id-123"` {
+		t.Errorf("expected ID '\"string-id-123\"', got '%s'", string(parsed.ID))
+	}
+}
+
+func TestForwardNotification(t *testing.T) {
+	client := NewClient(&ClientConfig{
+		Command: "echo",
+	})
+
+	// Forward a notification (no ID) without starting should fail
+	rawReq := []byte(`{"jsonrpc":"2.0","method":"notifications/test"}`)
+	_, err := client.Forward(context.Background(), rawReq)
+	if err == nil {
+		t.Error("expected error when forwarding without starting")
+	}
+}
+
+func TestForwardParseError(t *testing.T) {
+	client := NewClient(&ClientConfig{
+		Command: "echo",
+	})
+
+	rawReq := []byte(`invalid json`)
+	_, err := client.Forward(context.Background(), rawReq)
+	if err == nil {
+		t.Error("expected error when forwarding invalid JSON")
+	}
+}
+
+func TestNotifyNotStarted(t *testing.T) {
+	client := NewClient(&ClientConfig{
+		Command: "echo",
+	})
+
+	err := client.Notify("test/method", nil)
+	if err == nil {
+		t.Error("expected error when notifying without starting")
+	}
+}
+
+func TestClientAlreadyStarted(t *testing.T) {
+	client := NewClient(&ClientConfig{
+		Command: "sleep",
+		Args:    []string{"10"},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := client.Start(ctx); err != nil {
+		t.Fatalf("failed to start client: %v", err)
+	}
+	defer client.Close()
+
+	// Try to start again
+	err := client.Start(ctx)
+	if err == nil {
+		t.Error("expected error when starting already started client")
+	}
+}
+
+func TestIsInitialized(t *testing.T) {
+	client := NewClient(&ClientConfig{
+		Command: "echo",
+	})
+
+	if client.IsInitialized() {
+		t.Error("expected IsInitialized to be false before initialization")
+	}
+}
+
+func TestClientClose(t *testing.T) {
+	client := NewClient(&ClientConfig{
+		Command: "sleep",
+		Args:    []string{"10"},
+	})
+
+	ctx := context.Background()
+	if err := client.Start(ctx); err != nil {
+		t.Fatalf("failed to start client: %v", err)
+	}
+
+	// Close should terminate the process
+	if err := client.Close(); err != nil {
+		t.Errorf("unexpected error on close: %v", err)
+	}
+
+	// Double close should be safe
+	if err := client.Close(); err != nil {
+		t.Errorf("unexpected error on double close: %v", err)
+	}
+}

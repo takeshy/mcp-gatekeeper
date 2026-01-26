@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/takeshy/mcp-gatekeeper/internal/version"
 )
 
 // Server implements an HTTP bridge to stdio MCP servers
@@ -38,45 +40,53 @@ type ServerConfig struct {
 	RateLimitWindow time.Duration
 }
 
-// RateLimiter implements a simple rate limiter
+// RateLimiter implements a sliding window rate limiter using a ring buffer
 type RateLimiter struct {
-	mu       sync.Mutex
-	requests []time.Time
-	limit    int
-	window   time.Duration
+	mu         sync.Mutex
+	timestamps []int64 // Ring buffer of unix nano timestamps
+	head       int     // Next write position
+	count      int     // Current number of valid entries
+	limit      int
+	windowNano int64
 }
 
 // NewRateLimiter creates a new rate limiter
 func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
 	return &RateLimiter{
-		requests: make([]time.Time, 0),
-		limit:    limit,
-		window:   window,
+		timestamps: make([]int64, limit),
+		limit:      limit,
+		windowNano: window.Nanoseconds(),
 	}
 }
 
-// Allow checks if a request is allowed
+// Allow checks if a request is allowed using a sliding window algorithm
 func (r *RateLimiter) Allow() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	now := time.Now()
-	windowStart := now.Add(-r.window)
+	now := time.Now().UnixNano()
+	windowStart := now - r.windowNano
 
-	// Clean old requests
-	var valid []time.Time
-	for _, t := range r.requests {
-		if t.After(windowStart) {
-			valid = append(valid, t)
+	// Count valid (non-expired) entries
+	validCount := 0
+	for i := 0; i < r.count; i++ {
+		idx := (r.head - r.count + i + r.limit) % r.limit
+		if r.timestamps[idx] > windowStart {
+			validCount++
 		}
 	}
 
-	if len(valid) >= r.limit {
-		r.requests = valid
+	if validCount >= r.limit {
 		return false
 	}
 
-	r.requests = append(valid, now)
+	// Add new timestamp to ring buffer
+	r.timestamps[r.head] = now
+	r.head = (r.head + 1) % r.limit
+	if r.count < r.limit {
+		r.count++
+	}
+
 	return true
 }
 
@@ -189,7 +199,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		if parts[1] != s.apiKey {
+		if subtle.ConstantTimeCompare([]byte(parts[1]), []byte(s.apiKey)) != 1 {
 			s.writeError(w, http.StatusUnauthorized, "invalid API key")
 			return
 		}
@@ -243,7 +253,26 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if upstream is initialized
+	// Parse request to check method first
+	var req Request
+	if err := json.Unmarshal(rawReq, &req); err != nil {
+		s.writeJSONRPC(w, &Response{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32700,
+				Message: "Parse error",
+			},
+		})
+		return
+	}
+
+	// Handle initialize locally (don't forward, don't require upstream)
+	if req.Method == "initialize" {
+		s.handleInitialize(w, &req)
+		return
+	}
+
+	// Check if upstream is initialized for other methods
 	s.mu.RLock()
 	client := s.client
 	s.mu.RUnlock()
@@ -257,6 +286,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 				fmt.Fprintf(os.Stderr, "[bridge] failed to initialize upstream: %v\n", err)
 				s.writeJSONRPC(w, &Response{
 					JSONRPC: "2.0",
+					ID:      req.ID,
 					Error: &RPCError{
 						Code:    -32603,
 						Message: "Upstream not initialized",
@@ -266,25 +296,6 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		s.mu.Unlock()
-	}
-
-	// Parse request to check method
-	var req Request
-	if err := json.Unmarshal(rawReq, &req); err != nil {
-		s.writeJSONRPC(w, &Response{
-			JSONRPC: "2.0",
-			Error: &RPCError{
-				Code:    -32700,
-				Message: "Parse error",
-			},
-		})
-		return
-	}
-
-	// Handle initialize locally (don't forward)
-	if req.Method == "initialize" {
-		s.handleInitialize(w, &req)
-		return
 	}
 
 	// Forward to upstream
@@ -315,7 +326,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleInitialize(w http.ResponseWriter, req *Request) {
 	// Return bridge server info, forwarding upstream capabilities
 	result := map[string]interface{}{
-		"protocolVersion": "2024-11-05",
+		"protocolVersion": version.MCPProtocolVersion,
 		"capabilities": map[string]interface{}{
 			"tools": map[string]interface{}{
 				"listChanged": false,
@@ -323,7 +334,7 @@ func (s *Server) handleInitialize(w http.ResponseWriter, req *Request) {
 		},
 		"serverInfo": map[string]interface{}{
 			"name":    "mcp-gatekeeper-bridge",
-			"version": "1.0.0",
+			"version": version.Version,
 		},
 	}
 

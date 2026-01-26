@@ -206,10 +206,13 @@ func runHTTP(database *db.DB, addr string, rateLimit int, rootDir string, wasmDi
 }
 
 func runBridge(addr string, upstream string, upstreamEnv []string, apiKey string, rateLimit int) error {
-	// Parse upstream command
-	parts := strings.Fields(upstream)
+	// Parse upstream command with shell-like syntax support
+	parts, err := bridge.ParseCommand(upstream)
+	if err != nil {
+		return fmt.Errorf("invalid upstream command: %w", err)
+	}
 	if len(parts) == 0 {
-		return fmt.Errorf("invalid upstream command")
+		return fmt.Errorf("empty upstream command")
 	}
 
 	config := &bridge.ServerConfig{

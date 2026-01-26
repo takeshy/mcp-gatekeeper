@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/takeshy/mcp-gatekeeper/internal/version"
 )
 
 // Client manages communication with an external stdio MCP server
@@ -29,7 +31,7 @@ type Client struct {
 	stderr      *bufio.Reader
 	initialized atomic.Bool
 	requestID   atomic.Int64
-	pending     map[int64]chan *Response
+	pending     map[string]chan *Response // Key is the raw JSON ID string
 	pendingMu   sync.Mutex
 	done        chan struct{}
 	closeOnce   sync.Once
@@ -95,7 +97,7 @@ func NewClient(config *ClientConfig) *Client {
 		workDir:   config.WorkDir,
 		timeout:   config.Timeout,
 		maxOutput: config.MaxOutput,
-		pending:   make(map[int64]chan *Response),
+		pending:   make(map[string]chan *Response),
 		done:      make(chan struct{}),
 	}
 }
@@ -179,23 +181,36 @@ func (c *Client) readResponses() {
 			continue
 		}
 
-		var resp Response
-		if err := json.Unmarshal([]byte(line), &resp); err != nil {
-			fmt.Fprintf(os.Stderr, "[bridge] failed to parse response: %v\n", err)
+		// Try to parse as a generic message to check if it's a request or response
+		var msg struct {
+			JSONRPC string          `json:"jsonrpc"`
+			ID      json.RawMessage `json:"id,omitempty"`
+			Method  string          `json:"method,omitempty"`
+			Result  json.RawMessage `json:"result,omitempty"`
+			Error   json.RawMessage `json:"error,omitempty"`
+		}
+		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+			fmt.Fprintf(os.Stderr, "[bridge] failed to parse message: %v\n", err)
 			continue
 		}
 
-		// Route response to waiting request
-		if resp.ID != nil {
-			var id int64
-			if err := json.Unmarshal(resp.ID, &id); err == nil {
-				c.pendingMu.Lock()
-				if ch, ok := c.pending[id]; ok {
-					ch <- &resp
-					delete(c.pending, id)
-				}
-				c.pendingMu.Unlock()
+		// Check if this is a request from upstream (has method)
+		if msg.Method != "" {
+			c.handleUpstreamRequest(msg.ID, msg.Method, line)
+			continue
+		}
+
+		// This is a response
+		if msg.ID != nil && string(msg.ID) != "null" {
+			idKey := string(msg.ID)
+			c.pendingMu.Lock()
+			if ch, ok := c.pending[idKey]; ok {
+				var resp Response
+				json.Unmarshal([]byte(line), &resp)
+				ch <- &resp
+				delete(c.pending, idKey)
 			}
+			c.pendingMu.Unlock()
 		}
 	}
 }
@@ -226,7 +241,7 @@ func (c *Client) readStderr() {
 // Initialize sends the initialize request to the upstream server
 func (c *Client) Initialize(ctx context.Context) (*Response, error) {
 	params := map[string]interface{}{
-		"protocolVersion": "2024-11-05",
+		"protocolVersion": version.MCPProtocolVersion,
 		"capabilities": map[string]interface{}{
 			"roots": map[string]interface{}{
 				"listChanged": false,
@@ -234,7 +249,7 @@ func (c *Client) Initialize(ctx context.Context) (*Response, error) {
 		},
 		"clientInfo": map[string]interface{}{
 			"name":    "mcp-gatekeeper-bridge",
-			"version": "1.0.0",
+			"version": version.Version,
 		},
 	}
 
@@ -276,6 +291,7 @@ func (c *Client) Call(ctx context.Context, method string, params interface{}) (*
 	}
 
 	idJSON, _ := json.Marshal(id)
+	idKey := string(idJSON) // Use raw JSON as key
 	req := Request{
 		JSONRPC: "2.0",
 		ID:      idJSON,
@@ -286,13 +302,13 @@ func (c *Client) Call(ctx context.Context, method string, params interface{}) (*
 	// Create response channel
 	respCh := make(chan *Response, 1)
 	c.pendingMu.Lock()
-	c.pending[id] = respCh
+	c.pending[idKey] = respCh
 	c.pendingMu.Unlock()
 
 	// Clean up on exit
 	defer func() {
 		c.pendingMu.Lock()
-		delete(c.pending, id)
+		delete(c.pending, idKey)
 		c.pendingMu.Unlock()
 	}()
 
@@ -386,6 +402,57 @@ func (c *Client) IsInitialized() bool {
 	return c.initialized.Load()
 }
 
+// handleUpstreamRequest handles requests from upstream server (MCP bidirectional communication)
+func (c *Client) handleUpstreamRequest(id json.RawMessage, method string, raw string) {
+	var result interface{}
+
+	switch method {
+	case "roots/list":
+		// Return empty roots list
+		result = map[string]interface{}{
+			"roots": []interface{}{},
+		}
+	case "sampling/createMessage":
+		// Not supported, return error
+		c.sendErrorResponse(id, -32601, "Method not supported")
+		return
+	default:
+		// Unknown method, return error
+		c.sendErrorResponse(id, -32601, "Method not found")
+		return
+	}
+
+	c.sendResultResponse(id, result)
+}
+
+func (c *Client) sendResultResponse(id json.RawMessage, result interface{}) {
+	resultJSON, _ := json.Marshal(result)
+	resp := Response{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result:  resultJSON,
+	}
+	data, _ := json.Marshal(resp)
+	c.mu.Lock()
+	fmt.Fprintf(c.stdin, "%s\n", data)
+	c.mu.Unlock()
+}
+
+func (c *Client) sendErrorResponse(id json.RawMessage, code int, message string) {
+	resp := Response{
+		JSONRPC: "2.0",
+		ID:      id,
+		Error: &RPCError{
+			Code:    code,
+			Message: message,
+		},
+	}
+	data, _ := json.Marshal(resp)
+	c.mu.Lock()
+	fmt.Fprintf(c.stdin, "%s\n", data)
+	c.mu.Unlock()
+}
+
 // Close closes the client and terminates the process
 func (c *Client) Close() error {
 	var err error
@@ -421,7 +488,7 @@ func (c *Client) Close() error {
 		for _, ch := range c.pending {
 			close(ch)
 		}
-		c.pending = make(map[int64]chan *Response)
+		c.pending = make(map[string]chan *Response)
 		c.pendingMu.Unlock()
 	})
 
