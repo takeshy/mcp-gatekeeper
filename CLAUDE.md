@@ -40,13 +40,14 @@ go test -v -run TestFunctionName ./internal/package/
 
 Protocol Support:
   ├─ Stdio Mode: Direct MCP client integration
-  └─ HTTP Mode: JSON-RPC 2.0 with Bearer token auth
+  ├─ HTTP Mode: JSON-RPC 2.0 with Bearer token auth
+  └─ Bridge Mode: HTTP proxy to stdio MCP servers
 ```
 
 ## Key Source Files
 
 **Entry Points:**
-- `cmd/server/main.go` - Main MCP server with stdio/http modes
+- `cmd/server/main.go` - Main MCP server with stdio/http/bridge modes
 - `cmd/admin/main.go` - TUI admin tool (Bubble Tea)
 
 **Core Components:**
@@ -61,6 +62,10 @@ Protocol Support:
 - `internal/mcp/types.go` - JSON-RPC 2.0 types and MCP method definitions
 - `internal/mcp/stdio.go` - Stdio mode handler (line-by-line JSON-RPC)
 - `internal/mcp/http.go` - HTTP mode with rate limiting and auth middleware
+
+**HTTP Bridge:**
+- `internal/bridge/client.go` - Stdio MCP client for upstream communication
+- `internal/bridge/server.go` - HTTP bridge server with rate limiting
 
 **Database:**
 - `internal/db/db.go` - SQLite wrapper with embedded migrations
@@ -101,13 +106,15 @@ Protocol Support:
 ## CLI Flags
 
 ```bash
---root-dir=/path     # Required: sandbox root directory
+--root-dir=/path     # Required for stdio/http: sandbox root directory
 --db=gatekeeper.db   # SQLite database location
---mode=stdio|http    # Protocol mode
+--mode=stdio|http|bridge  # Protocol mode
 --addr=:8080         # HTTP listen address
---api-key=...        # API key for stdio mode
+--api-key=...        # API key for stdio/bridge mode
 --wasm-dir=/opt      # External WASM binaries directory
---rate-limit=500     # Max requests/min per key (HTTP mode)
+--rate-limit=500     # Max requests/min per key (HTTP/bridge mode)
+--upstream='cmd'     # Upstream stdio MCP server command (bridge mode)
+--upstream-env=...   # Comma-separated env vars for upstream (bridge mode)
 ```
 
 ## Per-Tool Configuration

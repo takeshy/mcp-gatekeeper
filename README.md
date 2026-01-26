@@ -19,7 +19,8 @@ While providing shell access, MCP Gatekeeper includes flexible security controls
 - **Bubblewrap Sandboxing**: `bwrap` integration for true process isolation
 - **WASM Sandboxing**: Run WebAssembly binaries in a secure wazero runtime with module caching
 - **Dynamic Tool Registration**: Define custom tools per API key via TUI
-- **Dual Protocol Support**: Both stdio and HTTP modes using MCP JSON-RPC protocol
+- **Triple Protocol Support**: Stdio, HTTP, and Bridge modes using MCP JSON-RPC protocol
+- **HTTP Bridge for Stdio MCP Servers**: Expose any stdio-based MCP server over HTTP
 - **TUI Admin Tool**: Interactive terminal interface for managing keys, tools, and viewing logs
 - **Audit Logging**: Complete logging of all command requests and execution results
 - **Rate Limiting**: Configurable rate limiting for the HTTP API (default: 500 req/min)
@@ -239,6 +240,15 @@ MCP_GATEKEEPER_API_KEY=your-api-key \
   --db=gatekeeper.db
 ```
 
+**Bridge Mode (expose stdio MCP servers over HTTP):**
+```bash
+./mcp-gatekeeper \
+  --mode=bridge \
+  --upstream='node /path/to/stdio-mcp-server.js' \
+  --addr=:8080 \
+  --api-key=optional-secret-key
+```
+
 ### 5. Test Execution
 
 Using curl with MCP JSON-RPC protocol (HTTP mode):
@@ -270,7 +280,9 @@ curl -X POST http://localhost:8080/mcp \
 |--------|---------|-------------|
 | `--root-dir` | (required) | Root directory for command execution (sandbox) |
 | `--wasm-dir` | - | Directory containing WASM binaries (mounted as `/.wasm` in WASM sandbox) |
-| `--mode` | `stdio` | Server mode: `stdio` or `http` |
+| `--mode` | `stdio` | Server mode: `stdio`, `http`, or `bridge` |
+| `--upstream` | - | Upstream stdio MCP server command (for bridge mode) |
+| `--upstream-env` | - | Comma-separated environment variables for upstream server |
 | `--db` | `gatekeeper.db` | SQLite database path |
 | `--addr` | `:8080` | HTTP server address (for http mode) |
 | `--rate-limit` | `500` | Rate limit per API key per minute (for http mode) |
@@ -438,6 +450,83 @@ In the TUI, create a tool with:
 - **WASM Binary**: `/opt/ruby-wasm/usr/local/bin/ruby`
 
 The WASM binary receives arguments via WASI's `args_get` and can access files within the root directory.
+
+### HTTP Bridge Mode
+
+Bridge mode allows you to expose any stdio-based MCP server over HTTP. This is useful when:
+- You have an MCP server that only supports stdio mode
+- You want to access a local MCP server from remote clients
+- You need to add authentication and rate limiting to an existing MCP server
+
+**How it works:**
+
+```
+┌─────────────┐      HTTP       ┌─────────────────┐     stdio      ┌─────────────────┐
+│  HTTP       │  ────────────▶  │   MCP Gateway   │  ────────────▶ │  Upstream MCP   │
+│  Client     │  ◀────────────  │   (bridge)      │  ◀──────────── │  Server         │
+└─────────────┘                 └─────────────────┘                └─────────────────┘
+```
+
+**Basic usage:**
+
+```bash
+# Bridge a stdio MCP server to HTTP
+./mcp-gatekeeper \
+  --mode=bridge \
+  --upstream='node /path/to/mcp-server.js' \
+  --addr=:8080
+```
+
+**With authentication:**
+
+```bash
+# Add API key authentication
+./mcp-gatekeeper \
+  --mode=bridge \
+  --upstream='python /path/to/mcp-server.py' \
+  --addr=:8080 \
+  --api-key=your-secret-key \
+  --rate-limit=100
+```
+
+Clients must then include the API key in requests:
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Authorization: Bearer your-secret-key" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}'
+```
+
+**With environment variables for upstream:**
+
+```bash
+# Pass environment variables to the upstream server
+./mcp-gatekeeper \
+  --mode=bridge \
+  --upstream='node /path/to/mcp-server.js' \
+  --upstream-env='API_KEY=secret,DEBUG=true' \
+  --addr=:8080
+```
+
+**Example: Bridge the filesystem MCP server:**
+
+```bash
+# Install the filesystem MCP server
+npm install -g @anthropic-ai/mcp-filesystem-server
+
+# Bridge it to HTTP
+./mcp-gatekeeper \
+  --mode=bridge \
+  --upstream='npx @anthropic-ai/mcp-filesystem-server /home/user/projects' \
+  --addr=:8080 \
+  --api-key=my-secret-key
+```
+
+**Notes:**
+- The bridge automatically initializes the upstream server
+- All JSON-RPC requests (except `initialize`) are forwarded to the upstream server
+- Rate limiting applies to all requests
+- The upstream process is automatically terminated when the bridge stops
 
 ### Glob Patterns
 
@@ -649,10 +738,11 @@ go test ./...
 ```
 mcp-gatekeeper/
 ├── cmd/
-│   ├── server/          # MCP server (stdio/HTTP)
+│   ├── server/          # MCP server (stdio/HTTP/bridge)
 │   └── admin/           # TUI admin tool
 ├── internal/
 │   ├── auth/            # API key authentication
+│   ├── bridge/          # HTTP bridge for stdio MCP servers
 │   ├── policy/          # Argument evaluation engine
 │   ├── executor/        # Command execution engine
 │   ├── db/              # Database access layer

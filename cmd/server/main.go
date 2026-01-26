@@ -8,9 +8,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/takeshy/mcp-gatekeeper/internal/bridge"
 	"github.com/takeshy/mcp-gatekeeper/internal/db"
 	"github.com/takeshy/mcp-gatekeeper/internal/mcp"
 	"github.com/takeshy/mcp-gatekeeper/internal/version"
@@ -19,13 +21,15 @@ import (
 func main() {
 	var (
 		showVersion = flag.Bool("version", false, "Show version and exit")
-		mode        = flag.String("mode", "stdio", "Server mode: stdio or http")
+		mode        = flag.String("mode", "stdio", "Server mode: stdio, http, or bridge")
 		dbPath      = flag.String("db", "gatekeeper.db", "SQLite database path")
-		addr        = flag.String("addr", ":8080", "HTTP server address (for http mode)")
-		apiKey      = flag.String("api-key", "", "API key for stdio mode (or MCP_GATEKEEPER_API_KEY env var)")
-		rateLimit   = flag.Int("rate-limit", 500, "Rate limit per API key per minute (for http mode)")
-		rootDir     = flag.String("root-dir", "", "Root directory for command execution (required, acts as chroot)")
+		addr        = flag.String("addr", ":8080", "HTTP server address (for http/bridge mode)")
+		apiKey      = flag.String("api-key", "", "API key for stdio/bridge mode (or MCP_GATEKEEPER_API_KEY env var)")
+		rateLimit   = flag.Int("rate-limit", 500, "Rate limit per API key per minute (for http/bridge mode)")
+		rootDir     = flag.String("root-dir", "", "Root directory for command execution (required for stdio/http, acts as chroot)")
 		wasmDir     = flag.String("wasm-dir", "", "Directory containing WASM binaries (mounted as /.wasm in WASM sandbox)")
+		upstream    = flag.String("upstream", "", "Upstream stdio MCP server command (for bridge mode, e.g., 'node /path/to/server.js')")
+		upstreamEnv = flag.String("upstream-env", "", "Comma-separated environment variables for upstream server (e.g., 'KEY1=val1,KEY2=val2')")
 	)
 	flag.Parse()
 
@@ -34,39 +38,44 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Validate required root-dir
-	if *rootDir == "" {
-		fmt.Fprintf(os.Stderr, "Error: --root-dir is required\n")
-		fmt.Fprintf(os.Stderr, "Usage: %s --root-dir=/path/to/allowed/directory [options]\n", os.Args[0])
-		os.Exit(1)
-	}
+	// Validate required root-dir (not required for bridge mode)
+	var rootDirAbs string
+	if *mode != "bridge" {
+		if *rootDir == "" {
+			fmt.Fprintf(os.Stderr, "Error: --root-dir is required\n")
+			fmt.Fprintf(os.Stderr, "Usage: %s --root-dir=/path/to/allowed/directory [options]\n", os.Args[0])
+			os.Exit(1)
+		}
 
-	// Validate root-dir exists and is a directory
-	rootDirAbs, err := filepath.Abs(*rootDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: invalid root-dir path: %v\n", err)
-		os.Exit(1)
-	}
+		// Validate root-dir exists and is a directory
+		var err error
+		rootDirAbs, err = filepath.Abs(*rootDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: invalid root-dir path: %v\n", err)
+			os.Exit(1)
+		}
 
-	info, err := os.Stat(rootDirAbs)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: root-dir does not exist: %v\n", err)
-		os.Exit(1)
-	}
-	if !info.IsDir() {
-		fmt.Fprintf(os.Stderr, "Error: root-dir is not a directory: %s\n", rootDirAbs)
-		os.Exit(1)
+		info, err := os.Stat(rootDirAbs)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: root-dir does not exist: %v\n", err)
+			os.Exit(1)
+		}
+		if !info.IsDir() {
+			fmt.Fprintf(os.Stderr, "Error: root-dir is not a directory: %s\n", rootDirAbs)
+			os.Exit(1)
+		}
 	}
 
 	// Validate wasm-dir if provided
 	var wasmDirAbs string
 	if *wasmDir != "" {
+		var err error
 		wasmDirAbs, err = filepath.Abs(*wasmDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: invalid wasm-dir path: %v\n", err)
 			os.Exit(1)
 		}
-		info, err = os.Stat(wasmDirAbs)
+		info, err := os.Stat(wasmDirAbs)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: wasm-dir does not exist: %v\n", err)
 			os.Exit(1)
@@ -80,6 +89,27 @@ func main() {
 	// Get API key from env if not provided
 	if *apiKey == "" {
 		*apiKey = os.Getenv("MCP_GATEKEEPER_API_KEY")
+	}
+
+	// Bridge mode doesn't need database
+	if *mode == "bridge" {
+		if *upstream == "" {
+			fmt.Fprintf(os.Stderr, "Error: --upstream is required for bridge mode\n")
+			fmt.Fprintf(os.Stderr, "Usage: %s --mode=bridge --upstream='node /path/to/mcp-server.js' [options]\n", os.Args[0])
+			os.Exit(1)
+		}
+
+		// Parse upstream environment variables
+		var upstreamEnvVars []string
+		if *upstreamEnv != "" {
+			upstreamEnvVars = strings.Split(*upstreamEnv, ",")
+		}
+
+		if err := runBridge(*addr, *upstream, upstreamEnvVars, *apiKey, *rateLimit); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	// Open database
@@ -167,6 +197,68 @@ func runHTTP(database *db.DB, addr string, rateLimit int, rootDir string, wasmDi
 		fmt.Printf("Starting HTTP server on %s (root-dir: %s, wasm-dir: %s)\n", addr, rootDir, wasmDir)
 	} else {
 		fmt.Printf("Starting HTTP server on %s (root-dir: %s)\n", addr, rootDir)
+	}
+	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
+		return fmt.Errorf("HTTP server error: %w", err)
+	}
+
+	return nil
+}
+
+func runBridge(addr string, upstream string, upstreamEnv []string, apiKey string, rateLimit int) error {
+	// Parse upstream command
+	parts := strings.Fields(upstream)
+	if len(parts) == 0 {
+		return fmt.Errorf("invalid upstream command")
+	}
+
+	config := &bridge.ServerConfig{
+		Command:         parts[0],
+		Args:            parts[1:],
+		Env:             upstreamEnv,
+		APIKey:          apiKey,
+		Timeout:         30 * time.Second,
+		RateLimit:       rateLimit,
+		RateLimitWindow: time.Minute,
+	}
+
+	server, err := bridge.NewServer(config)
+	if err != nil {
+		return fmt.Errorf("failed to create bridge server: %w", err)
+	}
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Start upstream connection
+	if err := server.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start bridge: %w", err)
+	}
+
+	httpServer := &http.Server{
+		Addr:         addr,
+		Handler:      server.Handler(),
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	// Handle signals
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-sigCh
+		cancel()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		httpServer.Shutdown(shutdownCtx)
+	}()
+
+	fmt.Printf("Starting HTTP bridge on %s (upstream: %s)\n", addr, upstream)
+	if apiKey != "" {
+		fmt.Printf("API key authentication enabled\n")
 	}
 	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		return fmt.Errorf("HTTP server error: %w", err)
