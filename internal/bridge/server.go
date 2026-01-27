@@ -13,7 +13,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/takeshy/mcp-gatekeeper/internal/db"
 	"github.com/takeshy/mcp-gatekeeper/internal/version"
 )
 
@@ -26,7 +25,6 @@ type Server struct {
 	maxResponseSize int
 	fileStore       *FileStore
 	debug           bool
-	db              *db.DB
 	mu              sync.RWMutex
 }
 
@@ -45,9 +43,6 @@ type ServerConfig struct {
 	RateLimitWindow time.Duration
 	MaxResponseSize int  // Max response size in bytes (default 500000)
 	Debug           bool // Enable debug logging
-
-	// Database for audit logging (optional)
-	DB *db.DB
 }
 
 // RateLimiter implements a sliding window rate limiter using a ring buffer
@@ -147,7 +142,6 @@ func NewServer(config *ServerConfig) (*Server, error) {
 		maxResponseSize: maxResponseSize,
 		fileStore:       fileStore,
 		debug:           config.Debug,
-		db:              config.DB,
 	}
 
 	s.setupRoutes()
@@ -497,43 +491,9 @@ func (s *Server) writeError(w http.ResponseWriter, status int, message string) {
 	s.writeJSON(w, status, map[string]string{"error": message})
 }
 
-// logAudit logs an MCP request/response to the database if configured
+// logAudit logs an MCP request/response (no-op without database)
 func (s *Server) logAudit(method string, params string, resp *Response, err error, startTime time.Time) {
-	if s.db == nil {
-		return
-	}
-
-	durationMs := time.Since(startTime).Milliseconds()
-
-	var respStr string
-	var errStr string
-	var responseSize int64
-
-	if resp != nil {
-		respJSON, _ := json.Marshal(resp)
-		respStr = string(respJSON)
-		responseSize = int64(len(respJSON))
-	}
-
-	if err != nil {
-		errStr = err.Error()
-	} else if resp != nil && resp.Error != nil {
-		errStr = resp.Error.Message
-	}
-
-	auditLog := &db.BridgeAuditLog{
-		Method:       method,
-		Params:       params,
-		Response:     respStr,
-		Error:        errStr,
-		RequestSize:  int64(len(params)),
-		ResponseSize: responseSize,
-		DurationMs:   durationMs,
-	}
-
-	if _, logErr := s.db.CreateBridgeAuditLog(auditLog); logErr != nil {
-		fmt.Fprintf(os.Stderr, "[bridge] failed to log audit: %v\n", logErr)
-	}
+	// Audit logging removed - no database dependency
 }
 
 // MaxContentSize is the maximum size of content to include in response (500KB)

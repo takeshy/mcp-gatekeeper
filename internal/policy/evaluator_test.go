@@ -3,7 +3,7 @@ package policy
 import (
 	"testing"
 
-	"github.com/takeshy/mcp-gatekeeper/internal/db"
+	"github.com/takeshy/mcp-gatekeeper/internal/plugin"
 )
 
 func TestEvaluator_EvaluateArgs(t *testing.T) {
@@ -11,72 +11,72 @@ func TestEvaluator_EvaluateArgs(t *testing.T) {
 
 	tests := []struct {
 		name        string
-		tool        *db.Tool
+		tool        *plugin.Tool
 		args        []string
 		wantAllowed bool
 	}{
 		{
 			name: "allow all when no restrictions",
-			tool: &db.Tool{
+			tool: &plugin.Tool{
 				Name:            "test-tool",
 				Command:         "/usr/bin/echo",
 				AllowedArgGlobs: []string{},
-				Sandbox:         db.SandboxTypeBubblewrap,
+				Sandbox:         plugin.SandboxTypeBubblewrap,
 			},
 			args:        []string{"hello", "world"},
 			wantAllowed: true,
 		},
 		{
 			name: "allow when args match pattern",
-			tool: &db.Tool{
+			tool: &plugin.Tool{
 				Name:            "git-tool",
 				Command:         "/usr/bin/git",
 				AllowedArgGlobs: []string{"status *", "log *", "diff *"},
-				Sandbox:         db.SandboxTypeBubblewrap,
+				Sandbox:         plugin.SandboxTypeBubblewrap,
 			},
 			args:        []string{"status", "--short"},
 			wantAllowed: true,
 		},
 		{
 			name: "deny when args don't match pattern",
-			tool: &db.Tool{
+			tool: &plugin.Tool{
 				Name:            "git-tool",
 				Command:         "/usr/bin/git",
 				AllowedArgGlobs: []string{"status *", "log *", "diff *"},
-				Sandbox:         db.SandboxTypeBubblewrap,
+				Sandbox:         plugin.SandboxTypeBubblewrap,
 			},
 			args:        []string{"push", "origin", "main"},
 			wantAllowed: false,
 		},
 		{
 			name: "allow with wildcard pattern",
-			tool: &db.Tool{
+			tool: &plugin.Tool{
 				Name:            "ls-tool",
 				Command:         "/bin/ls",
 				AllowedArgGlobs: []string{"**"},
-				Sandbox:         db.SandboxTypeBubblewrap,
+				Sandbox:         plugin.SandboxTypeBubblewrap,
 			},
 			args:        []string{"-la", "/tmp"},
 			wantAllowed: true,
 		},
 		{
 			name: "allow empty args with empty pattern match",
-			tool: &db.Tool{
+			tool: &plugin.Tool{
 				Name:            "pwd-tool",
 				Command:         "/bin/pwd",
 				AllowedArgGlobs: []string{""},
-				Sandbox:         db.SandboxTypeBubblewrap,
+				Sandbox:         plugin.SandboxTypeBubblewrap,
 			},
 			args:        []string{},
 			wantAllowed: true,
 		},
 		{
 			name: "deny empty args when pattern requires args",
-			tool: &db.Tool{
+			tool: &plugin.Tool{
 				Name:            "cat-tool",
 				Command:         "/bin/cat",
 				AllowedArgGlobs: []string{"*.txt"},
-				Sandbox:         db.SandboxTypeBubblewrap,
+				Sandbox:         plugin.SandboxTypeBubblewrap,
 			},
 			args:        []string{},
 			wantAllowed: false,
@@ -145,64 +145,64 @@ func TestEvaluator_FilterEnvKeys(t *testing.T) {
 func TestValidateTool(t *testing.T) {
 	tests := []struct {
 		name    string
-		tool    *db.Tool
+		tool    *plugin.Tool
 		wantErr bool
 	}{
 		{
 			name: "valid tool with bubblewrap",
-			tool: &db.Tool{
+			tool: &plugin.Tool{
 				Name:            "test-tool",
 				Command:         "/usr/bin/test",
 				AllowedArgGlobs: []string{"*"},
-				Sandbox:         db.SandboxTypeBubblewrap,
+				Sandbox:         plugin.SandboxTypeBubblewrap,
 			},
 			wantErr: false,
 		},
 		{
 			name: "valid tool with none sandbox",
-			tool: &db.Tool{
+			tool: &plugin.Tool{
 				Name:            "test-tool",
 				Command:         "/usr/bin/test",
 				AllowedArgGlobs: []string{},
-				Sandbox:         db.SandboxTypeNone,
+				Sandbox:         plugin.SandboxTypeNone,
 			},
 			wantErr: false,
 		},
 		{
 			name: "valid tool with wasm",
-			tool: &db.Tool{
+			tool: &plugin.Tool{
 				Name:            "wasm-tool",
 				Command:         "module",
 				AllowedArgGlobs: []string{},
-				Sandbox:         db.SandboxTypeWasm,
+				Sandbox:         plugin.SandboxTypeWasm,
 				WasmBinary:      "/path/to/module.wasm",
 			},
 			wantErr: false,
 		},
 		{
 			name: "invalid wasm without binary",
-			tool: &db.Tool{
+			tool: &plugin.Tool{
 				Name:            "wasm-tool",
 				Command:         "module",
 				AllowedArgGlobs: []string{},
-				Sandbox:         db.SandboxTypeWasm,
+				Sandbox:         plugin.SandboxTypeWasm,
 				WasmBinary:      "",
 			},
 			wantErr: true,
 		},
 		{
 			name: "invalid arg glob pattern",
-			tool: &db.Tool{
+			tool: &plugin.Tool{
 				Name:            "test-tool",
 				Command:         "/usr/bin/test",
 				AllowedArgGlobs: []string{"[invalid"},
-				Sandbox:         db.SandboxTypeBubblewrap,
+				Sandbox:         plugin.SandboxTypeBubblewrap,
 			},
 			wantErr: true,
 		},
 		{
 			name: "invalid sandbox type",
-			tool: &db.Tool{
+			tool: &plugin.Tool{
 				Name:            "test-tool",
 				Command:         "/usr/bin/test",
 				AllowedArgGlobs: []string{},

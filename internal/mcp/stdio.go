@@ -3,15 +3,15 @@ package mcp
 import (
 	"bufio"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
-	"github.com/takeshy/mcp-gatekeeper/internal/auth"
-	"github.com/takeshy/mcp-gatekeeper/internal/db"
 	"github.com/takeshy/mcp-gatekeeper/internal/executor"
+	"github.com/takeshy/mcp-gatekeeper/internal/plugin"
 	"github.com/takeshy/mcp-gatekeeper/internal/policy"
 )
 
@@ -23,28 +23,25 @@ const (
 
 // StdioServer implements the MCP server over stdio
 type StdioServer struct {
-	db          *db.DB
-	auth        *auth.Authenticator
+	plugins     *plugin.Config
 	evaluator   *policy.Evaluator
 	executor    *executor.Executor
 	initialized bool
-	apiKey      *db.APIKey
 	reader      *bufio.Reader
 	writer      io.Writer
 	rootDir     string
 }
 
 // NewStdioServer creates a new stdio MCP server
-func NewStdioServer(database *db.DB, apiKeyStr string, rootDir string, wasmDir string) (*StdioServer, error) {
-	authenticator := auth.NewAuthenticator(database)
-
-	// Authenticate API key
-	apiKey, err := authenticator.Authenticate(apiKeyStr)
-	if err != nil {
-		return nil, fmt.Errorf("failed to authenticate: %w", err)
-	}
-	if apiKey == nil {
-		return nil, fmt.Errorf("invalid API key")
+func NewStdioServer(plugins *plugin.Config, apiKey string, expectedAPIKey string, rootDir string, wasmDir string) (*StdioServer, error) {
+	// Validate API key if expected key is set
+	if expectedAPIKey != "" {
+		if apiKey == "" {
+			return nil, fmt.Errorf("API key required")
+		}
+		if subtle.ConstantTimeCompare([]byte(apiKey), []byte(expectedAPIKey)) != 1 {
+			return nil, fmt.Errorf("invalid API key")
+		}
 	}
 
 	execConfig := &executor.ExecutorConfig{
@@ -55,11 +52,9 @@ func NewStdioServer(database *db.DB, apiKeyStr string, rootDir string, wasmDir s
 	}
 
 	return &StdioServer{
-		db:        database,
-		auth:      authenticator,
+		plugins:   plugins,
 		evaluator: policy.NewEvaluator(),
 		executor:  executor.NewExecutor(execConfig),
-		apiKey:    apiKey,
 		reader:    bufio.NewReader(os.Stdin),
 		writer:    os.Stdout,
 		rootDir:   rootDir,
@@ -170,14 +165,11 @@ func (s *StdioServer) handleInitialize(req *Request) (*Response, error) {
 }
 
 func (s *StdioServer) handleToolsList(req *Request) (*Response, error) {
-	// Get tools from database for this API key
-	dbTools, err := s.db.ListToolsByAPIKeyID(s.apiKey.ID)
-	if err != nil {
-		return NewErrorResponse(req.ID, InternalError, "Failed to list tools", err.Error()), nil
-	}
+	// Get tools from plugins
+	pluginTools := s.plugins.ListTools()
 
-	tools := make([]Tool, len(dbTools))
-	for i, t := range dbTools {
+	tools := make([]Tool, len(pluginTools))
+	for i, t := range pluginTools {
 		tools[i] = Tool{
 			Name:        t.Name,
 			Description: t.Description,
@@ -208,21 +200,17 @@ func (s *StdioServer) handleToolsCall(ctx context.Context, req *Request) (*Respo
 		return NewErrorResponse(req.ID, InvalidParams, "Invalid params", err.Error()), nil
 	}
 
-	// Look up tool by name for this API key
-	tool, err := s.db.GetToolByAPIKeyAndName(s.apiKey.ID, params.Name)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[ERROR] Failed to get tool: %v\n", err)
-		return NewErrorResponse(req.ID, InternalError, "Failed to get tool", err.Error()), nil
-	}
+	// Look up tool by name from plugins
+	tool := s.plugins.GetTool(params.Name)
 	if tool == nil {
-		fmt.Fprintf(os.Stderr, "[ERROR] Tool not found: %s for apiKey=%s\n", params.Name, s.apiKey.Name)
+		fmt.Fprintf(os.Stderr, "[ERROR] Tool not found: %s\n", params.Name)
 		return NewErrorResponse(req.ID, MethodNotFound, "Tool not found", params.Name), nil
 	}
 
 	return s.handleExecute(ctx, req.ID, tool, params.Arguments)
 }
 
-func (s *StdioServer) handleExecute(ctx context.Context, id json.RawMessage, tool *db.Tool, args map[string]interface{}) (*Response, error) {
+func (s *StdioServer) handleExecute(ctx context.Context, id json.RawMessage, tool *plugin.Tool, args map[string]interface{}) (*Response, error) {
 	// Parse arguments
 	cwd, _ := args["cwd"].(string)
 	var cmdArgs []string
@@ -245,47 +233,21 @@ func (s *StdioServer) handleExecute(ctx context.Context, id json.RawMessage, too
 		return NewErrorResponse(id, InternalError, "Policy evaluation failed", err.Error()), nil
 	}
 
-	// Create audit log
-	auditLog := &db.AuditLog{
-		APIKeyID:          s.apiKey.ID,
-		RequestedCwd:      cwd,
-		RequestedCmd:      tool.Command,
-		RequestedArgs:     cmdArgs,
-		NormalizedCwd:     cwd,
-		NormalizedCmdline: tool.Command + " " + strings.Join(cmdArgs, " "),
-		MatchedRules:      decision.MatchedRules,
-	}
-
 	if !decision.Allowed {
 		fmt.Fprintf(os.Stderr, "[WARN] Arguments denied by policy: %s\n", decision.Reason)
-		auditLog.Decision = db.DecisionDeny
-		s.db.CreateAuditLog(auditLog)
 		return NewErrorResponse(id, PolicyDenied, "Arguments denied by policy", decision.Reason), nil
 	}
 
-	auditLog.Decision = db.DecisionAllow
-
 	// Filter environment variables
-	filteredEnvKeys := s.evaluator.FilterEnvKeys(s.apiKey.AllowedEnvKeys, getEnvKeys(os.Environ()))
+	filteredEnvKeys := s.evaluator.FilterEnvKeys(s.plugins.AllowedEnvKeys, getEnvKeys(os.Environ()))
 	filteredEnv := filterEnvByKeys(os.Environ(), filteredEnvKeys)
 
 	// Execute command using the tool's sandbox setting
 	result, err := s.executor.ExecuteWithSandbox(ctx, cwd, tool.Command, cmdArgs, filteredEnv, tool.Sandbox, tool.WasmBinary)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[ERROR] Execution failed: %v\n", err)
-		auditLog.Stderr = err.Error()
-		s.db.CreateAuditLog(auditLog)
 		return NewErrorResponse(id, ExecutionFailed, "Execution failed", err.Error()), nil
 	}
-
-	// Update audit log with result
-	auditLog.Stdout = result.Stdout
-	auditLog.Stderr = result.Stderr
-	auditLog.ExitCode.Int64 = int64(result.ExitCode)
-	auditLog.ExitCode.Valid = true
-	auditLog.DurationMs.Int64 = result.DurationMs
-	auditLog.DurationMs.Valid = true
-	s.db.CreateAuditLog(auditLog)
 
 	// Return result
 	content := []Content{

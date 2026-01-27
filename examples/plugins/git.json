@@ -1,0 +1,26 @@
+{
+  "tools": [
+    {
+      "name": "git_status",
+      "description": "Show git repository status",
+      "command": "git",
+      "allowed_arg_globs": ["status", "status *"],
+      "sandbox": "none"
+    },
+    {
+      "name": "git_log",
+      "description": "Show git commit log",
+      "command": "git",
+      "allowed_arg_globs": ["log *", "log"],
+      "sandbox": "none"
+    },
+    {
+      "name": "git_diff",
+      "description": "Show git diff",
+      "command": "git",
+      "allowed_arg_globs": ["diff", "diff *"],
+      "sandbox": "none"
+    }
+  ],
+  "allowed_env_keys": ["HOME", "USER", "PATH", "GIT_*"]
+}

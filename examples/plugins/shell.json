@@ -1,0 +1,33 @@
+{
+  "tools": [
+    {
+      "name": "ls",
+      "description": "List directory contents",
+      "command": "ls",
+      "allowed_arg_globs": ["", "-l", "-la", "-lah", "-a", "*"],
+      "sandbox": "bubblewrap"
+    },
+    {
+      "name": "cat",
+      "description": "Display file contents",
+      "command": "cat",
+      "allowed_arg_globs": ["*"],
+      "sandbox": "bubblewrap"
+    },
+    {
+      "name": "find",
+      "description": "Find files",
+      "command": "find",
+      "allowed_arg_globs": ["*"],
+      "sandbox": "bubblewrap"
+    },
+    {
+      "name": "grep",
+      "description": "Search text patterns",
+      "command": "grep",
+      "allowed_arg_globs": ["*"],
+      "sandbox": "bubblewrap"
+    }
+  ],
+  "allowed_env_keys": ["HOME", "USER", "PATH", "LANG", "LC_*"]
+}
