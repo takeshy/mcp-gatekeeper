@@ -71,6 +71,7 @@ type HTTPServer struct {
 	rateLimiter *RateLimiter
 	router      chi.Router
 	rootDir     string
+	fixedAPIKey *db.APIKey // Fixed API key (if set, no auth header required)
 }
 
 // HTTPConfig holds HTTP server configuration
@@ -79,6 +80,7 @@ type HTTPConfig struct {
 	RateLimitWindow time.Duration
 	RootDir         string
 	WasmDir         string
+	APIKey          string // Fixed API key (optional, if set no auth header required)
 }
 
 // DefaultHTTPConfig returns the default HTTP configuration
@@ -90,7 +92,7 @@ func DefaultHTTPConfig() *HTTPConfig {
 }
 
 // NewHTTPServer creates a new HTTP server
-func NewHTTPServer(database *db.DB, config *HTTPConfig) *HTTPServer {
+func NewHTTPServer(database *db.DB, config *HTTPConfig) (*HTTPServer, error) {
 	if config == nil {
 		config = DefaultHTTPConfig()
 	}
@@ -102,17 +104,31 @@ func NewHTTPServer(database *db.DB, config *HTTPConfig) *HTTPServer {
 		WasmDir:   config.WasmDir,
 	}
 
+	authenticator := auth.NewAuthenticator(database)
+
 	s := &HTTPServer{
 		db:          database,
-		auth:        auth.NewAuthenticator(database),
+		auth:        authenticator,
 		evaluator:   policy.NewEvaluator(),
 		executor:    executor.NewExecutor(execConfig),
 		rateLimiter: NewRateLimiter(config.RateLimit, config.RateLimitWindow),
 		rootDir:     config.RootDir,
 	}
 
+	// If fixed API key is provided, authenticate it once at startup
+	if config.APIKey != "" {
+		apiKey, err := authenticator.Authenticate(config.APIKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to authenticate API key: %w", err)
+		}
+		if apiKey == nil {
+			return nil, fmt.Errorf("invalid API key")
+		}
+		s.fixedAPIKey = apiKey
+	}
+
 	s.setupRoutes()
-	return s
+	return s, nil
 }
 
 func (s *HTTPServer) setupRoutes() {
@@ -143,30 +159,38 @@ func (s *HTTPServer) Handler() http.Handler {
 // authMiddleware handles API key authentication
 func (s *HTTPServer) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Get API key from Authorization header
-		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" {
-			s.writeError(w, http.StatusUnauthorized, "missing authorization header")
-			return
-		}
+		var apiKey *db.APIKey
 
-		// Parse Bearer token
-		parts := strings.SplitN(authHeader, " ", 2)
-		if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-			s.writeError(w, http.StatusUnauthorized, "invalid authorization header format")
-			return
-		}
-		apiKeyStr := parts[1]
+		// If fixed API key is set, use it (no auth header required)
+		if s.fixedAPIKey != nil {
+			apiKey = s.fixedAPIKey
+		} else {
+			// Get API key from Authorization header
+			authHeader := r.Header.Get("Authorization")
+			if authHeader == "" {
+				s.writeError(w, http.StatusUnauthorized, "missing authorization header")
+				return
+			}
 
-		// Authenticate
-		apiKey, err := s.auth.Authenticate(apiKeyStr)
-		if err != nil {
-			s.writeError(w, http.StatusInternalServerError, "authentication error")
-			return
-		}
-		if apiKey == nil {
-			s.writeError(w, http.StatusUnauthorized, "invalid API key")
-			return
+			// Parse Bearer token
+			parts := strings.SplitN(authHeader, " ", 2)
+			if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
+				s.writeError(w, http.StatusUnauthorized, "invalid authorization header format")
+				return
+			}
+			apiKeyStr := parts[1]
+
+			// Authenticate
+			var err error
+			apiKey, err = s.auth.Authenticate(apiKeyStr)
+			if err != nil {
+				s.writeError(w, http.StatusInternalServerError, "authentication error")
+				return
+			}
+			if apiKey == nil {
+				s.writeError(w, http.StatusUnauthorized, "invalid API key")
+				return
+			}
 		}
 
 		// Check rate limit

@@ -291,16 +291,17 @@ func TestSandbox_WrapCommand_BwrapMode(t *testing.T) {
 		t.Errorf("WrapCommand() args should contain 'echo hello', got %v", args)
 	}
 
-	// Args should contain --chdir with the cwd
+	// Args should contain --chdir with the sandbox path
+	// Since cwd == rootDir, the sandbox path is "/" (rootDir maps to / inside sandbox)
 	foundChdir := false
 	for i, arg := range args {
-		if arg == "--chdir" && i+1 < len(args) && args[i+1] == tmpDir {
+		if arg == "--chdir" && i+1 < len(args) && args[i+1] == "/" {
 			foundChdir = true
 			break
 		}
 	}
 	if !foundChdir {
-		t.Errorf("WrapCommand() args should contain '--chdir %s', got %v", tmpDir, args)
+		t.Errorf("WrapCommand() args should contain '--chdir /', got %v", args)
 	}
 }
 
