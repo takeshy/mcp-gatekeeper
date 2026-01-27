@@ -92,6 +92,9 @@ Tool configuration example:
 
 # With fixed API key (no auth header required from client)
 ./mcp-gatekeeper --mode=http --root-dir=/home/user/projects --db=gatekeeper.db --api-key=your-key
+
+# Using environment variable
+MCP_GATEKEEPER_API_KEY=your-key ./mcp-gatekeeper --mode=http --root-dir=/home/user/projects --db=gatekeeper.db
 ```
 
 **Stdio Mode:**
@@ -133,7 +136,7 @@ curl -X POST http://localhost:8080/mcp \
 | `--root-dir` | (required) | Sandbox root (required for stdio/http) |
 | `--db` | `gatekeeper.db` | SQLite database path (optional for bridge) |
 | `--addr` | `:8080` | HTTP address (http/bridge) |
-| `--api-key` | - | API key (stdio/bridge) |
+| `--api-key` | - | Fixed API key for all modes (or `MCP_GATEKEEPER_API_KEY` env var) |
 | `--rate-limit` | `500` | Rate limit per minute (http/bridge) |
 | `--upstream` | - | Upstream command (required for bridge) |
 | `--upstream-env` | - | Environment variables for upstream (comma-separated) |

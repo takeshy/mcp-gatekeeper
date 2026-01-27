@@ -92,6 +92,9 @@ TUIで:
 
 # 固定APIキー（クライアントからの認証ヘッダー不要）
 ./mcp-gatekeeper --mode=http --root-dir=/home/user/projects --db=gatekeeper.db --api-key=your-key
+
+# 環境変数を使用
+MCP_GATEKEEPER_API_KEY=your-key ./mcp-gatekeeper --mode=http --root-dir=/home/user/projects --db=gatekeeper.db
 ```
 
 **Stdio モード:**
@@ -133,7 +136,7 @@ curl -X POST http://localhost:8080/mcp \
 | `--root-dir` | (必須) | サンドボックスルート（stdio/http で必須） |
 | `--db` | `gatekeeper.db` | SQLite データベースパス（bridge ではオプション） |
 | `--addr` | `:8080` | HTTP アドレス（http/bridge） |
-| `--api-key` | - | APIキー（stdio/bridge） |
+| `--api-key` | - | 固定APIキー（全モード対応、または `MCP_GATEKEEPER_API_KEY` 環境変数） |
 | `--rate-limit` | `500` | レート制限/分（http/bridge） |
 | `--upstream` | - | 上流コマンド（bridge で必須） |
 | `--upstream-env` | - | 上流への環境変数（カンマ区切り） |

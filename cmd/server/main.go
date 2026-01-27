@@ -24,7 +24,7 @@ func main() {
 		mode            = flag.String("mode", "stdio", "Server mode: stdio, http, or bridge")
 		dbPath          = flag.String("db", "gatekeeper.db", "SQLite database path")
 		addr            = flag.String("addr", ":8080", "HTTP server address (for http/bridge mode)")
-		apiKey          = flag.String("api-key", "", "API key for stdio/bridge mode (or MCP_GATEKEEPER_API_KEY env var)")
+		apiKey          = flag.String("api-key", "", "Fixed API key for all modes (or MCP_GATEKEEPER_API_KEY env var)")
 		rateLimit       = flag.Int("rate-limit", 500, "Rate limit per API key per minute (for http/bridge mode)")
 		rootDir         = flag.String("root-dir", "", "Root directory for command execution (required for stdio/http, acts as chroot)")
 		wasmDir         = flag.String("wasm-dir", "", "Directory containing WASM binaries (mounted as /.wasm in WASM sandbox)")
