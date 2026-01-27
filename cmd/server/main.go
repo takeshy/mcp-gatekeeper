@@ -132,7 +132,7 @@ func main() {
 			os.Exit(1)
 		}
 	case "http":
-		if err := runHTTP(database, *addr, *rateLimit, rootDirAbs, wasmDirAbs); err != nil {
+		if err := runHTTP(database, *addr, *rateLimit, rootDirAbs, wasmDirAbs, *apiKey); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -166,14 +166,18 @@ func runStdio(database *db.DB, apiKey string, rootDir string, wasmDir string) er
 	return server.Run(ctx)
 }
 
-func runHTTP(database *db.DB, addr string, rateLimit int, rootDir string, wasmDir string) error {
+func runHTTP(database *db.DB, addr string, rateLimit int, rootDir string, wasmDir string, apiKey string) error {
 	config := &mcp.HTTPConfig{
 		RateLimit:       rateLimit,
 		RateLimitWindow: time.Minute,
 		RootDir:         rootDir,
 		WasmDir:         wasmDir,
+		APIKey:          apiKey,
 	}
-	server := mcp.NewHTTPServer(database, config)
+	server, err := mcp.NewHTTPServer(database, config)
+	if err != nil {
+		return fmt.Errorf("failed to create HTTP server: %w", err)
+	}
 
 	httpServer := &http.Server{
 		Addr:         addr,

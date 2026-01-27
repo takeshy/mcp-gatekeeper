@@ -87,7 +87,11 @@ TUIで:
 
 **HTTP モード:**
 ```bash
+# リクエストごとの認証（クライアントが Authorization ヘッダーを送信）
 ./mcp-gatekeeper --mode=http --root-dir=/home/user/projects --db=gatekeeper.db
+
+# 固定APIキー（クライアントからの認証ヘッダー不要）
+./mcp-gatekeeper --mode=http --root-dir=/home/user/projects --db=gatekeeper.db --api-key=your-key
 ```
 
 **Stdio モード:**

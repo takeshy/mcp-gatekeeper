@@ -87,7 +87,11 @@ Tool configuration example:
 
 **HTTP Mode:**
 ```bash
+# With per-request auth (client sends Authorization header)
 ./mcp-gatekeeper --mode=http --root-dir=/home/user/projects --db=gatekeeper.db
+
+# With fixed API key (no auth header required from client)
+./mcp-gatekeeper --mode=http --root-dir=/home/user/projects --db=gatekeeper.db --api-key=your-key
 ```
 
 **Stdio Mode:**
