@@ -98,6 +98,12 @@ MCP_GATEKEEPER_API_KEY=your-key ./mcp-gatekeeper --mode=stdio --root-dir=/home/u
 **Bridge Mode:**
 ```bash
 ./mcp-gatekeeper --mode=bridge --upstream='npx @anthropic-ai/mcp-server' --addr=:8080
+
+# Playwright MCP example (headless browser automation)
+./mcp-gatekeeper --mode=bridge --addr=:8090 --upstream='npx @playwright/mcp --executable-path /path/to/chrome --headless --no-sandbox --isolated'
+
+# With debug logging
+./mcp-gatekeeper --debug --mode=bridge --addr=:8090 --upstream='npx @playwright/mcp --headless'
 ```
 
 ### 3. Test Execution
@@ -121,6 +127,8 @@ curl -X POST http://localhost:8080/mcp \
 | `--rate-limit` | `500` | Rate limit per minute (http/bridge) |
 | `--upstream` | - | Upstream command (required for bridge) |
 | `--upstream-env` | - | Environment variables for upstream (comma-separated) |
+| `--max-response-size` | `500000` | Max response size in bytes (bridge only) |
+| `--debug` | `false` | Enable debug logging (bridge only) |
 | `--wasm-dir` | - | WASM binary directory |
 
 ## Sandbox

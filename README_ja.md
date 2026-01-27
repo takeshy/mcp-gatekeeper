@@ -98,6 +98,12 @@ MCP_GATEKEEPER_API_KEY=your-key ./mcp-gatekeeper --mode=stdio --root-dir=/home/u
 **Bridge モード（stdio MCPサーバーをHTTPでプロキシ）:**
 ```bash
 ./mcp-gatekeeper --mode=bridge --upstream='npx @anthropic-ai/mcp-server' --addr=:8080 --api-key=your-secret
+
+# Playwright MCP の例（ヘッドレスブラウザ自動化）
+./mcp-gatekeeper --mode=bridge --addr=:8090 --upstream='npx @playwright/mcp --executable-path /path/to/chrome --headless --no-sandbox --isolated'
+
+# デバッグログ付き
+./mcp-gatekeeper --debug --mode=bridge --addr=:8090 --upstream='npx @playwright/mcp --headless'
 ```
 
 ### 3. 実行テスト
@@ -121,6 +127,8 @@ curl -X POST http://localhost:8080/mcp \
 | `--rate-limit` | `500` | レート制限/分（http/bridge） |
 | `--upstream` | - | 上流コマンド（bridge で必須） |
 | `--upstream-env` | - | 上流への環境変数（カンマ区切り） |
+| `--max-response-size` | `500000` | 最大レスポンスサイズ（バイト、bridge のみ） |
+| `--debug` | `false` | デバッグログ有効化（bridge のみ） |
 | `--wasm-dir` | - | WASMバイナリ格納ディレクトリ |
 
 ## サンドボックス

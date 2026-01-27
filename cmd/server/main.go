@@ -28,8 +28,9 @@ func main() {
 		rateLimit   = flag.Int("rate-limit", 500, "Rate limit per API key per minute (for http/bridge mode)")
 		rootDir     = flag.String("root-dir", "", "Root directory for command execution (required for stdio/http, acts as chroot)")
 		wasmDir     = flag.String("wasm-dir", "", "Directory containing WASM binaries (mounted as /.wasm in WASM sandbox)")
-		upstream    = flag.String("upstream", "", "Upstream stdio MCP server command (for bridge mode, e.g., 'node /path/to/server.js')")
-		upstreamEnv = flag.String("upstream-env", "", "Comma-separated environment variables for upstream server (e.g., 'KEY1=val1,KEY2=val2')")
+		upstream        = flag.String("upstream", "", "Upstream stdio MCP server command (for bridge mode, e.g., 'node /path/to/server.js')")
+		upstreamEnv     = flag.String("upstream-env", "", "Comma-separated environment variables for upstream server (e.g., 'KEY1=val1,KEY2=val2')")
+		maxResponseSize = flag.Int("max-response-size", 500000, "Max response size in bytes for bridge mode (default 500000)")
 	)
 	flag.Parse()
 
@@ -105,7 +106,7 @@ func main() {
 			upstreamEnvVars = strings.Split(*upstreamEnv, ",")
 		}
 
-		if err := runBridge(*addr, *upstream, upstreamEnvVars, *apiKey, *rateLimit); err != nil {
+		if err := runBridge(*addr, *upstream, upstreamEnvVars, *apiKey, *rateLimit, *maxResponseSize); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -205,7 +206,7 @@ func runHTTP(database *db.DB, addr string, rateLimit int, rootDir string, wasmDi
 	return nil
 }
 
-func runBridge(addr string, upstream string, upstreamEnv []string, apiKey string, rateLimit int) error {
+func runBridge(addr string, upstream string, upstreamEnv []string, apiKey string, rateLimit int, maxResponseSize int) error {
 	// Parse upstream command with shell-like syntax support
 	parts, err := bridge.ParseCommand(upstream)
 	if err != nil {
@@ -223,6 +224,7 @@ func runBridge(addr string, upstream string, upstreamEnv []string, apiKey string
 		Timeout:         30 * time.Second,
 		RateLimit:       rateLimit,
 		RateLimitWindow: time.Minute,
+		MaxResponseSize: maxResponseSize,
 	}
 
 	server, err := bridge.NewServer(config)
@@ -259,7 +261,7 @@ func runBridge(addr string, upstream string, upstreamEnv []string, apiKey string
 		httpServer.Shutdown(shutdownCtx)
 	}()
 
-	fmt.Printf("Starting HTTP bridge on %s (upstream: %s)\n", addr, upstream)
+	fmt.Printf("Starting HTTP bridge on %s (upstream: %s, max-response-size: %d)\n", addr, upstream, maxResponseSize)
 	if apiKey != "" {
 		fmt.Printf("API key authentication enabled\n")
 	}

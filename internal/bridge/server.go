@@ -18,11 +18,12 @@ import (
 
 // Server implements an HTTP bridge to stdio MCP servers
 type Server struct {
-	client      *Client
-	router      chi.Router
-	apiKey      string
-	rateLimiter *RateLimiter
-	mu          sync.RWMutex
+	client          *Client
+	router          chi.Router
+	apiKey          string
+	rateLimiter     *RateLimiter
+	maxResponseSize int
+	mu              sync.RWMutex
 }
 
 // ServerConfig holds server configuration
@@ -38,6 +39,7 @@ type ServerConfig struct {
 	Timeout         time.Duration
 	RateLimit       int
 	RateLimitWindow time.Duration
+	MaxResponseSize int // Max response size in bytes (default 500000)
 }
 
 // RateLimiter implements a sliding window rate limiter using a ring buffer
@@ -119,10 +121,16 @@ func NewServer(config *ServerConfig) (*Server, error) {
 		rateLimitWindow = time.Minute
 	}
 
+	maxResponseSize := config.MaxResponseSize
+	if maxResponseSize == 0 {
+		maxResponseSize = 500000 // Default 500KB (~500K tokens)
+	}
+
 	s := &Server{
-		client:      NewClient(clientConfig),
-		apiKey:      config.APIKey,
-		rateLimiter: NewRateLimiter(rateLimit, rateLimitWindow),
+		client:          NewClient(clientConfig),
+		apiKey:          config.APIKey,
+		rateLimiter:     NewRateLimiter(rateLimit, rateLimitWindow),
+		maxResponseSize: maxResponseSize,
 	}
 
 	s.setupRoutes()
@@ -316,6 +324,33 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	// Notification (no response)
 	if resp == nil {
 		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// Check response size
+	respJSON, err := json.Marshal(resp)
+	if err != nil {
+		s.writeJSONRPC(w, &Response{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error: &RPCError{
+				Code:    -32603,
+				Message: "Failed to marshal response",
+			},
+		})
+		return
+	}
+
+	if len(respJSON) > s.maxResponseSize {
+		fmt.Fprintf(os.Stderr, "[bridge] response too large: %d bytes (max: %d)\n", len(respJSON), s.maxResponseSize)
+		s.writeJSONRPC(w, &Response{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error: &RPCError{
+				Code:    -32603,
+				Message: fmt.Sprintf("Response too large: %d bytes exceeds limit of %d bytes", len(respJSON), s.maxResponseSize),
+			},
+		})
 		return
 	}
 
