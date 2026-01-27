@@ -108,6 +108,12 @@ MCP_GATEKEEPER_API_KEY=your-key ./mcp-gatekeeper --mode=stdio --root-dir=/home/u
 
 # デバッグログ付き
 ./mcp-gatekeeper --debug --mode=bridge --addr=:8090 --upstream='npx @playwright/mcp --headless'
+
+# 監査ログ付き（オプション）
+./mcp-gatekeeper --mode=bridge --upstream='npx @playwright/mcp --headless' --db=gatekeeper.db
+
+# APIキー認証付き
+./mcp-gatekeeper --mode=bridge --upstream='npx @playwright/mcp --headless' --api-key=your-secret-key
 ```
 
 ### 3. 実行テスト
@@ -125,7 +131,7 @@ curl -X POST http://localhost:8080/mcp \
 |-----------|-----------|------|
 | `--mode` | `stdio` | `stdio`, `http`, `bridge` |
 | `--root-dir` | (必須) | サンドボックスルート（stdio/http で必須） |
-| `--db` | `gatekeeper.db` | SQLite データベースパス |
+| `--db` | `gatekeeper.db` | SQLite データベースパス（bridge ではオプション） |
 | `--addr` | `:8080` | HTTP アドレス（http/bridge） |
 | `--api-key` | - | APIキー（stdio/bridge） |
 | `--rate-limit` | `500` | レート制限/分（http/bridge） |
@@ -134,6 +140,52 @@ curl -X POST http://localhost:8080/mcp \
 | `--max-response-size` | `500000` | 最大レスポンスサイズ（バイト、bridge のみ） |
 | `--debug` | `false` | デバッグログ有効化（bridge のみ） |
 | `--wasm-dir` | - | WASMバイナリ格納ディレクトリ |
+
+## Bridge モードの機能
+
+### ファイル外部化
+
+MCPレスポンス内の大きなコンテンツ（500KB超）は自動的に一時ファイルに外部化されます。クライアントはHTTP経由でファイルを取得するURLを受け取ります。
+
+**レスポンス形式:**
+```json
+{
+  "type": "external_file",
+  "url": "http://localhost:8090/files/abc123...",
+  "mimeType": "image/png",
+  "size": 1843200
+}
+```
+
+**ファイル取得:**
+```bash
+curl http://localhost:8090/files/abc123...
+```
+
+ファイルは1回取得後に削除されます（ワンタイムアクセス）。`--api-key` が設定されている場合、`/files/{key}` エンドポイントにも認証が必要です。
+
+### 監査ログ
+
+`--db` を指定すると、すべてのMCPリクエストとレスポンスが `bridge_audit_logs` テーブルに記録されます。
+
+```bash
+# 監査ログを有効化
+./mcp-gatekeeper --mode=bridge --upstream='...' --db=gatekeeper.db
+```
+
+**記録されるフィールド:**
+- `method` - MCPメソッド（例: `tools/call`, `initialize`）
+- `params` - リクエストパラメータ（JSON）
+- `response` - 外部化前の元のレスポンス（JSON）
+- `error` - エラーメッセージ（あれば）
+- `request_size` / `response_size` - サイズ（バイト）
+- `duration_ms` - 処理時間（ミリ秒）
+- `created_at` - タイムスタンプ
+
+**ログの確認:**
+```bash
+sqlite3 gatekeeper.db "SELECT id, method, response_size, duration_ms FROM bridge_audit_logs ORDER BY id DESC LIMIT 10"
+```
 
 ## サンドボックス
 

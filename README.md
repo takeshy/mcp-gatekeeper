@@ -108,6 +108,12 @@ MCP_GATEKEEPER_API_KEY=your-key ./mcp-gatekeeper --mode=stdio --root-dir=/home/u
 
 # With debug logging
 ./mcp-gatekeeper --debug --mode=bridge --addr=:8090 --upstream='npx @playwright/mcp --headless'
+
+# With audit logging (optional)
+./mcp-gatekeeper --mode=bridge --upstream='npx @playwright/mcp --headless' --db=gatekeeper.db
+
+# With API key authentication
+./mcp-gatekeeper --mode=bridge --upstream='npx @playwright/mcp --headless' --api-key=your-secret-key
 ```
 
 ### 3. Test Execution
@@ -125,7 +131,7 @@ curl -X POST http://localhost:8080/mcp \
 |--------|---------|-------------|
 | `--mode` | `stdio` | `stdio`, `http`, `bridge` |
 | `--root-dir` | (required) | Sandbox root (required for stdio/http) |
-| `--db` | `gatekeeper.db` | SQLite database path |
+| `--db` | `gatekeeper.db` | SQLite database path (optional for bridge) |
 | `--addr` | `:8080` | HTTP address (http/bridge) |
 | `--api-key` | - | API key (stdio/bridge) |
 | `--rate-limit` | `500` | Rate limit per minute (http/bridge) |
@@ -134,6 +140,52 @@ curl -X POST http://localhost:8080/mcp \
 | `--max-response-size` | `500000` | Max response size in bytes (bridge only) |
 | `--debug` | `false` | Enable debug logging (bridge only) |
 | `--wasm-dir` | - | WASM binary directory |
+
+## Bridge Mode Features
+
+### File Externalization
+
+Large content (>500KB) in MCP responses is automatically externalized to temporary files. Clients receive a URL to retrieve the file via HTTP.
+
+**Response format:**
+```json
+{
+  "type": "external_file",
+  "url": "http://localhost:8090/files/abc123...",
+  "mimeType": "image/png",
+  "size": 1843200
+}
+```
+
+**File retrieval:**
+```bash
+curl http://localhost:8090/files/abc123...
+```
+
+Files are deleted after one retrieval (one-time access). If `--api-key` is set, the `/files/{key}` endpoint also requires authentication.
+
+### Audit Logging
+
+When `--db` is specified, all MCP requests and responses are logged to the `bridge_audit_logs` table.
+
+```bash
+# Enable audit logging
+./mcp-gatekeeper --mode=bridge --upstream='...' --db=gatekeeper.db
+```
+
+**Logged fields:**
+- `method` - MCP method (e.g., `tools/call`, `initialize`)
+- `params` - Request parameters (JSON)
+- `response` - Original response before externalization (JSON)
+- `error` - Error message if any
+- `request_size` / `response_size` - Sizes in bytes
+- `duration_ms` - Processing time in milliseconds
+- `created_at` - Timestamp
+
+**Query logs:**
+```bash
+sqlite3 gatekeeper.db "SELECT id, method, response_size, duration_ms FROM bridge_audit_logs ORDER BY id DESC LIMIT 10"
+```
 
 ## Sandbox
 
