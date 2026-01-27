@@ -20,17 +20,18 @@ import (
 
 func main() {
 	var (
-		showVersion = flag.Bool("version", false, "Show version and exit")
-		mode        = flag.String("mode", "stdio", "Server mode: stdio, http, or bridge")
-		dbPath      = flag.String("db", "gatekeeper.db", "SQLite database path")
-		addr        = flag.String("addr", ":8080", "HTTP server address (for http/bridge mode)")
-		apiKey      = flag.String("api-key", "", "API key for stdio/bridge mode (or MCP_GATEKEEPER_API_KEY env var)")
-		rateLimit   = flag.Int("rate-limit", 500, "Rate limit per API key per minute (for http/bridge mode)")
-		rootDir     = flag.String("root-dir", "", "Root directory for command execution (required for stdio/http, acts as chroot)")
-		wasmDir     = flag.String("wasm-dir", "", "Directory containing WASM binaries (mounted as /.wasm in WASM sandbox)")
+		showVersion     = flag.Bool("version", false, "Show version and exit")
+		mode            = flag.String("mode", "stdio", "Server mode: stdio, http, or bridge")
+		dbPath          = flag.String("db", "gatekeeper.db", "SQLite database path")
+		addr            = flag.String("addr", ":8080", "HTTP server address (for http/bridge mode)")
+		apiKey          = flag.String("api-key", "", "API key for stdio/bridge mode (or MCP_GATEKEEPER_API_KEY env var)")
+		rateLimit       = flag.Int("rate-limit", 500, "Rate limit per API key per minute (for http/bridge mode)")
+		rootDir         = flag.String("root-dir", "", "Root directory for command execution (required for stdio/http, acts as chroot)")
+		wasmDir         = flag.String("wasm-dir", "", "Directory containing WASM binaries (mounted as /.wasm in WASM sandbox)")
 		upstream        = flag.String("upstream", "", "Upstream stdio MCP server command (for bridge mode, e.g., 'node /path/to/server.js')")
 		upstreamEnv     = flag.String("upstream-env", "", "Comma-separated environment variables for upstream server (e.g., 'KEY1=val1,KEY2=val2')")
 		maxResponseSize = flag.Int("max-response-size", 500000, "Max response size in bytes for bridge mode (default 500000)")
+		debug           = flag.Bool("debug", false, "Enable debug logging (logs request/response for bridge mode)")
 	)
 	flag.Parse()
 
@@ -92,7 +93,7 @@ func main() {
 		*apiKey = os.Getenv("MCP_GATEKEEPER_API_KEY")
 	}
 
-	// Bridge mode doesn't need database
+	// Bridge mode - database is optional for audit logging
 	if *mode == "bridge" {
 		if *upstream == "" {
 			fmt.Fprintf(os.Stderr, "Error: --upstream is required for bridge mode\n")
@@ -106,7 +107,27 @@ func main() {
 			upstreamEnvVars = strings.Split(*upstreamEnv, ",")
 		}
 
-		if err := runBridge(*addr, *upstream, upstreamEnvVars, *apiKey, *rateLimit, *maxResponseSize); err != nil {
+		// Open database for audit logging only if explicitly requested
+		// Check if --db flag was explicitly set (not the default value for bridge mode)
+		var database *db.DB
+		dbExplicitlySet := false
+		flag.Visit(func(f *flag.Flag) {
+			if f.Name == "db" {
+				dbExplicitlySet = true
+			}
+		})
+		if dbExplicitlySet && *dbPath != "" {
+			var err error
+			database, err = db.Open(*dbPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to open database for audit logging: %v\n", err)
+			} else {
+				defer database.Close()
+				fmt.Printf("Audit logging enabled (db: %s)\n", *dbPath)
+			}
+		}
+
+		if err := runBridge(*addr, *upstream, upstreamEnvVars, *apiKey, *rateLimit, *maxResponseSize, *debug, database); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -210,7 +231,7 @@ func runHTTP(database *db.DB, addr string, rateLimit int, rootDir string, wasmDi
 	return nil
 }
 
-func runBridge(addr string, upstream string, upstreamEnv []string, apiKey string, rateLimit int, maxResponseSize int) error {
+func runBridge(addr string, upstream string, upstreamEnv []string, apiKey string, rateLimit int, maxResponseSize int, debug bool, database *db.DB) error {
 	// Parse upstream command with shell-like syntax support
 	parts, err := bridge.ParseCommand(upstream)
 	if err != nil {
@@ -229,6 +250,8 @@ func runBridge(addr string, upstream string, upstreamEnv []string, apiKey string
 		RateLimit:       rateLimit,
 		RateLimitWindow: time.Minute,
 		MaxResponseSize: maxResponseSize,
+		Debug:           debug,
+		DB:              database,
 	}
 
 	server, err := bridge.NewServer(config)
@@ -266,6 +289,9 @@ func runBridge(addr string, upstream string, upstreamEnv []string, apiKey string
 	}()
 
 	fmt.Printf("Starting HTTP bridge on %s (upstream: %s, max-response-size: %d)\n", addr, upstream, maxResponseSize)
+	if debug {
+		fmt.Printf("Debug logging enabled\n")
+	}
 	if apiKey != "" {
 		fmt.Printf("API key authentication enabled\n")
 	}
