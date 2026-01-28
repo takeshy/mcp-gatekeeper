@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,16 +14,16 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
-	"github.com/takeshy/mcp-gatekeeper/internal/auth"
 	"github.com/takeshy/mcp-gatekeeper/internal/db"
 	"github.com/takeshy/mcp-gatekeeper/internal/executor"
+	"github.com/takeshy/mcp-gatekeeper/internal/plugin"
 	"github.com/takeshy/mcp-gatekeeper/internal/policy"
 )
 
 // RateLimiter implements a simple rate limiter
 type RateLimiter struct {
 	mu       sync.Mutex
-	requests map[int64][]time.Time
+	requests []time.Time
 	limit    int
 	window   time.Duration
 }
@@ -30,14 +31,14 @@ type RateLimiter struct {
 // NewRateLimiter creates a new rate limiter
 func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
 	return &RateLimiter{
-		requests: make(map[int64][]time.Time),
+		requests: make([]time.Time, 0),
 		limit:    limit,
 		window:   window,
 	}
 }
 
-// Allow checks if a request is allowed for the given API key ID
-func (r *RateLimiter) Allow(apiKeyID int64) bool {
+// Allow checks if a request is allowed
+func (r *RateLimiter) Allow() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -45,33 +46,32 @@ func (r *RateLimiter) Allow(apiKeyID int64) bool {
 	windowStart := now.Add(-r.window)
 
 	// Clean old requests
-	times := r.requests[apiKeyID]
 	var valid []time.Time
-	for _, t := range times {
+	for _, t := range r.requests {
 		if t.After(windowStart) {
 			valid = append(valid, t)
 		}
 	}
 
 	if len(valid) >= r.limit {
-		r.requests[apiKeyID] = valid
+		r.requests = valid
 		return false
 	}
 
-	r.requests[apiKeyID] = append(valid, now)
+	r.requests = append(valid, now)
 	return true
 }
 
 // HTTPServer implements the HTTP API server
 type HTTPServer struct {
-	db          *db.DB
-	auth        *auth.Authenticator
-	evaluator   *policy.Evaluator
-	executor    *executor.Executor
-	rateLimiter *RateLimiter
-	router      chi.Router
-	rootDir     string
-	fixedAPIKey *db.APIKey // Fixed API key (if set, no auth header required)
+	plugins        *plugin.Config
+	evaluator      *policy.Evaluator
+	executor       *executor.Executor
+	rateLimiter    *RateLimiter
+	router         chi.Router
+	rootDir        string
+	expectedAPIKey string // Expected API key for authentication
+	db             *db.DB // Optional database for audit logging
 }
 
 // HTTPConfig holds HTTP server configuration
@@ -80,7 +80,8 @@ type HTTPConfig struct {
 	RateLimitWindow time.Duration
 	RootDir         string
 	WasmDir         string
-	APIKey          string // Fixed API key (optional, if set no auth header required)
+	APIKey          string // Expected API key for authentication (optional)
+	DB              *db.DB // Optional database for audit logging
 }
 
 // DefaultHTTPConfig returns the default HTTP configuration
@@ -92,7 +93,7 @@ func DefaultHTTPConfig() *HTTPConfig {
 }
 
 // NewHTTPServer creates a new HTTP server
-func NewHTTPServer(database *db.DB, config *HTTPConfig) (*HTTPServer, error) {
+func NewHTTPServer(plugins *plugin.Config, config *HTTPConfig) (*HTTPServer, error) {
 	if config == nil {
 		config = DefaultHTTPConfig()
 	}
@@ -104,27 +105,14 @@ func NewHTTPServer(database *db.DB, config *HTTPConfig) (*HTTPServer, error) {
 		WasmDir:   config.WasmDir,
 	}
 
-	authenticator := auth.NewAuthenticator(database)
-
 	s := &HTTPServer{
-		db:          database,
-		auth:        authenticator,
-		evaluator:   policy.NewEvaluator(),
-		executor:    executor.NewExecutor(execConfig),
-		rateLimiter: NewRateLimiter(config.RateLimit, config.RateLimitWindow),
-		rootDir:     config.RootDir,
-	}
-
-	// If fixed API key is provided, authenticate it once at startup
-	if config.APIKey != "" {
-		apiKey, err := authenticator.Authenticate(config.APIKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to authenticate API key: %w", err)
-		}
-		if apiKey == nil {
-			return nil, fmt.Errorf("invalid API key")
-		}
-		s.fixedAPIKey = apiKey
+		plugins:        plugins,
+		evaluator:      policy.NewEvaluator(),
+		executor:       executor.NewExecutor(execConfig),
+		rateLimiter:    NewRateLimiter(config.RateLimit, config.RateLimitWindow),
+		rootDir:        config.RootDir,
+		expectedAPIKey: config.APIKey,
+		db:             config.DB,
 	}
 
 	s.setupRoutes()
@@ -159,51 +147,45 @@ func (s *HTTPServer) Handler() http.Handler {
 // authMiddleware handles API key authentication
 func (s *HTTPServer) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var apiKey *db.APIKey
+		// If no API key is configured, skip authentication
+		if s.expectedAPIKey == "" {
+			// Still check rate limit
+			if !s.rateLimiter.Allow() {
+				s.writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
 
-		// If fixed API key is set, use it (no auth header required)
-		if s.fixedAPIKey != nil {
-			apiKey = s.fixedAPIKey
-		} else {
-			// Get API key from Authorization header
-			authHeader := r.Header.Get("Authorization")
-			if authHeader == "" {
-				s.writeError(w, http.StatusUnauthorized, "missing authorization header")
-				return
-			}
+		// Get API key from Authorization header
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			s.writeError(w, http.StatusUnauthorized, "missing authorization header")
+			return
+		}
 
-			// Parse Bearer token
-			parts := strings.SplitN(authHeader, " ", 2)
-			if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-				s.writeError(w, http.StatusUnauthorized, "invalid authorization header format")
-				return
-			}
-			apiKeyStr := parts[1]
+		// Parse Bearer token
+		parts := strings.SplitN(authHeader, " ", 2)
+		if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
+			s.writeError(w, http.StatusUnauthorized, "invalid authorization header format")
+			return
+		}
+		apiKey := parts[1]
 
-			// Authenticate
-			var err error
-			apiKey, err = s.auth.Authenticate(apiKeyStr)
-			if err != nil {
-				s.writeError(w, http.StatusInternalServerError, "authentication error")
-				return
-			}
-			if apiKey == nil {
-				s.writeError(w, http.StatusUnauthorized, "invalid API key")
-				return
-			}
+		// Validate API key using constant-time comparison
+		if subtle.ConstantTimeCompare([]byte(apiKey), []byte(s.expectedAPIKey)) != 1 {
+			s.writeError(w, http.StatusUnauthorized, "invalid API key")
+			return
 		}
 
 		// Check rate limit
-		if !s.rateLimiter.Allow(apiKey.ID) {
+		if !s.rateLimiter.Allow() {
 			s.writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 			return
 		}
 
-		// Store in context
-		ctx := r.Context()
-		ctx = contextWithAPIKey(ctx, apiKey)
-
-		next.ServeHTTP(w, r.WithContext(ctx))
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -213,9 +195,6 @@ func (s *HTTPServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // handleMCP handles MCP JSON-RPC requests
 func (s *HTTPServer) handleMCP(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	apiKey := apiKeyFromContext(ctx)
-
 	var req Request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		fmt.Fprintf(os.Stderr, "[ERROR] Failed to parse JSON-RPC request: %v\n", err)
@@ -240,9 +219,13 @@ func (s *HTTPServer) handleMCP(w http.ResponseWriter, r *http.Request) {
 	case "initialize":
 		resp = s.handleMCPInitialize(&req)
 	case "tools/list":
-		resp = s.handleMCPToolsList(apiKey, &req)
+		resp = s.handleMCPToolsList(&req)
 	case "tools/call":
-		resp = s.handleMCPToolsCall(ctx, apiKey, &req)
+		resp = s.handleMCPToolsCall(r.Context(), &req)
+	case "resources/list":
+		resp = s.handleMCPResourcesList(&req)
+	case "resources/read":
+		resp = s.handleMCPResourcesRead(&req)
 	case "ping":
 		resp = NewResponse(req.ID, struct{}{})
 	default:
@@ -265,13 +248,23 @@ func (s *HTTPServer) handleMCPNotification(req *Request) {
 }
 
 func (s *HTTPServer) handleMCPInitialize(req *Request) *Response {
+	caps := ServerCapabilities{
+		Tools: &ToolsCapability{
+			ListChanged: false,
+		},
+	}
+
+	// Add resources capability if any tool has UI enabled
+	if s.hasUIEnabledTools() {
+		caps.Resources = &ResourcesCapability{
+			Subscribe:   false,
+			ListChanged: false,
+		}
+	}
+
 	result := &InitializeResult{
 		ProtocolVersion: ProtocolVersion,
-		Capabilities: ServerCapabilities{
-			Tools: &ToolsCapability{
-				ListChanged: false,
-			},
-		},
+		Capabilities:    caps,
 		ServerInfo: ServerInfo{
 			Name:    ServerName,
 			Version: ServerVersion,
@@ -280,14 +273,20 @@ func (s *HTTPServer) handleMCPInitialize(req *Request) *Response {
 	return NewResponse(req.ID, result)
 }
 
-func (s *HTTPServer) handleMCPToolsList(apiKey *db.APIKey, req *Request) *Response {
-	dbTools, err := s.db.ListToolsByAPIKeyID(apiKey.ID)
-	if err != nil {
-		return NewErrorResponse(req.ID, InternalError, "Failed to list tools", err.Error())
+func (s *HTTPServer) hasUIEnabledTools() bool {
+	for _, t := range s.plugins.ListTools() {
+		if t.UIType != "" || t.UITemplate != "" {
+			return true
+		}
 	}
+	return false
+}
 
-	tools := make([]Tool, len(dbTools))
-	for i, t := range dbTools {
+func (s *HTTPServer) handleMCPToolsList(req *Request) *Response {
+	pluginTools := s.plugins.ListTools()
+
+	tools := make([]Tool, len(pluginTools))
+	for i, t := range pluginTools {
 		tools[i] = Tool{
 			Name:        t.Name,
 			Description: t.Description,
@@ -306,26 +305,28 @@ func (s *HTTPServer) handleMCPToolsList(apiKey *db.APIKey, req *Request) *Respon
 				},
 				Required: []string{},
 			},
+			Meta: BuildToolMeta(t),
 		}
 	}
 	return NewResponse(req.ID, &ListToolsResult{Tools: tools})
 }
 
-func (s *HTTPServer) handleMCPToolsCall(ctx context.Context, apiKey *db.APIKey, req *Request) *Response {
+func (s *HTTPServer) handleMCPToolsCall(ctx context.Context, req *Request) *Response {
+	startTime := time.Now()
 	var params CallToolParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		return NewErrorResponse(req.ID, InvalidParams, "Invalid params", err.Error())
+		resp := NewErrorResponse(req.ID, InvalidParams, "Invalid params", err.Error())
+		s.logAudit(req.Method, params.Name, req.Params, resp, err, startTime)
+		return resp
 	}
 
-	// Look up tool by name for this API key
-	tool, err := s.db.GetToolByAPIKeyAndName(apiKey.ID, params.Name)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[ERROR] Failed to get tool: %v\n", err)
-		return NewErrorResponse(req.ID, InternalError, "Failed to get tool", err.Error())
-	}
+	// Look up tool by name from plugins
+	tool := s.plugins.GetTool(params.Name)
 	if tool == nil {
-		fmt.Fprintf(os.Stderr, "[ERROR] Tool not found: %s for apiKey=%s\n", params.Name, apiKey.Name)
-		return NewErrorResponse(req.ID, MethodNotFound, "Tool not found", params.Name)
+		fmt.Fprintf(os.Stderr, "[ERROR] Tool not found: %s\n", params.Name)
+		resp := NewErrorResponse(req.ID, MethodNotFound, "Tool not found", params.Name)
+		s.logAudit(req.Method, params.Name, req.Params, resp, fmt.Errorf("tool not found: %s", params.Name), startTime)
+		return resp
 	}
 
 	// Parse arguments
@@ -344,53 +345,38 @@ func (s *HTTPServer) handleMCPToolsCall(ctx context.Context, apiKey *db.APIKey, 
 		cwd = s.rootDir
 	}
 
-	// Evaluate policy (check if args are allowed)
+	// Evaluate policy (check if user-provided args are allowed)
 	decision, err := s.evaluator.EvaluateArgs(tool, cmdArgs)
 	if err != nil {
-		return NewErrorResponse(req.ID, InternalError, "Policy evaluation failed", err.Error())
-	}
-
-	// Create audit log
-	auditLog := &db.AuditLog{
-		APIKeyID:          apiKey.ID,
-		RequestedCwd:      cwd,
-		RequestedCmd:      tool.Command,
-		RequestedArgs:     cmdArgs,
-		NormalizedCwd:     cwd,
-		NormalizedCmdline: tool.Command + " " + strings.Join(cmdArgs, " "),
-		MatchedRules:      decision.MatchedRules,
+		resp := NewErrorResponse(req.ID, InternalError, "Policy evaluation failed", err.Error())
+		s.logAudit(req.Method, params.Name, req.Params, resp, err, startTime)
+		return resp
 	}
 
 	if !decision.Allowed {
 		fmt.Fprintf(os.Stderr, "[WARN] Arguments denied by policy: %s\n", decision.Reason)
-		auditLog.Decision = db.DecisionDeny
-		s.db.CreateAuditLog(auditLog)
-		return NewErrorResponse(req.ID, PolicyDenied, "Arguments denied by policy", decision.Reason)
+		resp := NewErrorResponse(req.ID, PolicyDenied, "Arguments denied by policy", decision.Reason)
+		s.logAudit(req.Method, params.Name, req.Params, resp, fmt.Errorf("policy denied: %s", decision.Reason), startTime)
+		return resp
 	}
 
-	auditLog.Decision = db.DecisionAllow
-
 	// Filter environment variables
-	filteredEnvKeys := s.evaluator.FilterEnvKeys(apiKey.AllowedEnvKeys, getEnvKeys(os.Environ()))
+	filteredEnvKeys := s.evaluator.FilterEnvKeys(s.plugins.AllowedEnvKeys, getEnvKeys(os.Environ()))
 	filteredEnv := filterEnvByKeys(os.Environ(), filteredEnvKeys)
+
+	// Prepend args_prefix if defined (after policy evaluation)
+	if len(tool.ArgsPrefix) > 0 {
+		cmdArgs = append(tool.ArgsPrefix, cmdArgs...)
+	}
 
 	// Execute command using the tool's sandbox setting
 	result, err := s.executor.ExecuteWithSandbox(ctx, cwd, tool.Command, cmdArgs, filteredEnv, tool.Sandbox, tool.WasmBinary)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[ERROR] Execution failed: %v\n", err)
-		auditLog.Stderr = err.Error()
-		s.db.CreateAuditLog(auditLog)
-		return NewErrorResponse(req.ID, ExecutionFailed, "Execution failed", err.Error())
+		resp := NewErrorResponse(req.ID, ExecutionFailed, "Execution failed", err.Error())
+		s.logAudit(req.Method, params.Name, req.Params, resp, err, startTime)
+		return resp
 	}
-
-	// Update audit log with result
-	auditLog.Stdout = result.Stdout
-	auditLog.Stderr = result.Stderr
-	auditLog.ExitCode.Int64 = int64(result.ExitCode)
-	auditLog.ExitCode.Valid = true
-	auditLog.DurationMs.Int64 = result.DurationMs
-	auditLog.DurationMs.Valid = true
-	s.db.CreateAuditLog(auditLog)
 
 	// Return MCP-formatted result
 	content := []Content{
@@ -400,14 +386,103 @@ func (s *HTTPServer) handleMCPToolsCall(ctx context.Context, apiKey *db.APIKey, 
 		},
 	}
 
-	return NewResponse(req.ID, &CallToolResult{
+	resp := NewResponse(req.ID, &CallToolResult{
 		Content: content,
 		IsError: result.ExitCode != 0,
 		Metadata: &ResultMetadata{
 			ExitCode: result.ExitCode,
 			Stderr:   result.Stderr,
 		},
+		Meta: BuildResultMeta(tool, result.Stdout),
 	})
+	s.logAudit(req.Method, params.Name, req.Params, resp, nil, startTime)
+	return resp
+}
+
+func (s *HTTPServer) handleMCPResourcesList(req *Request) *Response {
+	// List UI resources for tools that have UI enabled
+	pluginTools := s.plugins.ListTools()
+
+	var resources []Resource
+	for _, t := range pluginTools {
+		if t.UIType != "" || t.UITemplate != "" {
+			resources = append(resources, Resource{
+				URI:         UIResourceURI(t.Name),
+				Name:        fmt.Sprintf("%s UI", t.Name),
+				Description: fmt.Sprintf("Interactive UI for %s tool", t.Name),
+				MimeType:    "text/html",
+			})
+		}
+	}
+
+	return NewResponse(req.ID, &ListResourcesResult{Resources: resources})
+}
+
+func (s *HTTPServer) handleMCPResourcesRead(req *Request) *Response {
+	var params ReadResourceParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, InvalidParams, "Invalid params", err.Error())
+	}
+
+	// Parse ui:// URI
+	if !strings.HasPrefix(params.URI, "ui://") {
+		return NewErrorResponse(req.ID, InvalidParams, "Invalid resource URI", "Only ui:// URIs are supported")
+	}
+
+	// Extract tool name and query string
+	uriPath := strings.TrimPrefix(params.URI, "ui://")
+	parts := strings.SplitN(uriPath, "?", 2)
+	pathParts := strings.Split(parts[0], "/")
+	if len(pathParts) < 1 {
+		return NewErrorResponse(req.ID, InvalidParams, "Invalid resource URI", "Missing tool name")
+	}
+	toolName := pathParts[0]
+
+	// Get the tool from plugins
+	tool := s.plugins.GetTool(toolName)
+	if tool == nil {
+		return NewErrorResponse(req.ID, MethodNotFound, "Tool not found", toolName)
+	}
+
+	// Check if tool has UI enabled
+	if tool.UIType == "" && tool.UITemplate == "" {
+		return NewErrorResponse(req.ID, InvalidParams, "Tool has no UI", toolName)
+	}
+
+	// Extract data from query string
+	var encodedData string
+	if len(parts) > 1 {
+		queryParts := strings.SplitN(parts[1], "=", 2)
+		if len(queryParts) == 2 && queryParts[0] == "data" {
+			encodedData = queryParts[1]
+		}
+	}
+
+	// Generate HTML
+	htmlContent, err := GenerateUIHTML(tool, encodedData)
+	if err != nil {
+		return NewErrorResponse(req.ID, InternalError, "Failed to generate UI", err.Error())
+	}
+
+	return NewResponse(req.ID, &ReadResourceResult{
+		Contents: []ResourceContent{
+			{
+				URI:      params.URI,
+				MimeType: "text/html",
+				Text:     htmlContent,
+			},
+		},
+	})
+}
+
+// logAudit logs an audit entry if database is configured
+func (s *HTTPServer) logAudit(method string, toolName string, params interface{}, resp *Response, err error, startTime time.Time) {
+	if s.db == nil {
+		return
+	}
+	if logErr := s.db.LogAudit(db.AuditModeHTTP, method, toolName, params, resp, err, startTime); logErr != nil {
+		fmt.Fprintf(os.Stderr, "[WARN] Failed to log audit: %v\n", logErr)
+	}
 }
 
 func (s *HTTPServer) writeJSONRPC(w http.ResponseWriter, resp *Response) {
@@ -424,22 +499,4 @@ func (s *HTTPServer) writeJSON(w http.ResponseWriter, status int, data interface
 
 func (s *HTTPServer) writeError(w http.ResponseWriter, status int, message string) {
 	s.writeJSON(w, status, map[string]string{"error": message})
-}
-
-// Context helpers
-type contextKey string
-
-const (
-	apiKeyContextKey contextKey = "apiKey"
-)
-
-func contextWithAPIKey(ctx context.Context, apiKey *db.APIKey) context.Context {
-	return context.WithValue(ctx, apiKeyContextKey, apiKey)
-}
-
-func apiKeyFromContext(ctx context.Context) *db.APIKey {
-	if v := ctx.Value(apiKeyContextKey); v != nil {
-		return v.(*db.APIKey)
-	}
-	return nil
 }

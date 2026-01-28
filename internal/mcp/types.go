@@ -90,11 +90,18 @@ type InitializeResult struct {
 
 // ServerCapabilities represents server capabilities
 type ServerCapabilities struct {
-	Tools *ToolsCapability `json:"tools,omitempty"`
+	Tools     *ToolsCapability     `json:"tools,omitempty"`
+	Resources *ResourcesCapability `json:"resources,omitempty"`
 }
 
 // ToolsCapability represents tools capability
 type ToolsCapability struct {
+	ListChanged bool `json:"listChanged,omitempty"`
+}
+
+// ResourcesCapability represents resources capability
+type ResourcesCapability struct {
+	Subscribe   bool `json:"subscribe,omitempty"`
 	ListChanged bool `json:"listChanged,omitempty"`
 }
 
@@ -106,9 +113,10 @@ type ServerInfo struct {
 
 // Tool represents an MCP tool
 type Tool struct {
-	Name        string      `json:"name"`
-	Description string      `json:"description,omitempty"`
-	InputSchema InputSchema `json:"inputSchema"`
+	Name        string                 `json:"name"`
+	Description string                 `json:"description,omitempty"`
+	InputSchema InputSchema            `json:"inputSchema"`
+	Meta        map[string]interface{} `json:"_meta,omitempty"`
 }
 
 // InputSchema represents the JSON schema for tool input
@@ -144,9 +152,10 @@ type CallToolParams struct {
 
 // CallToolResult represents the result of tools/call request
 type CallToolResult struct {
-	Content  []Content        `json:"content"`
-	IsError  bool             `json:"isError,omitempty"`
-	Metadata *ResultMetadata  `json:"metadata,omitempty"`
+	Content  []Content              `json:"content"`
+	IsError  bool                   `json:"isError,omitempty"`
+	Metadata *ResultMetadata        `json:"metadata,omitempty"`
+	Meta     map[string]interface{} `json:"_meta,omitempty"`
 }
 
 // ResultMetadata contains execution metadata
@@ -194,4 +203,35 @@ func NewErrorResponse(id json.RawMessage, code int, message string, data any) *R
 			Data:    data,
 		},
 	}
+}
+
+// Resource represents an MCP resource
+type Resource struct {
+	URI         string `json:"uri"`
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
+	MimeType    string `json:"mimeType,omitempty"`
+}
+
+// ListResourcesResult represents the result of resources/list request
+type ListResourcesResult struct {
+	Resources []Resource `json:"resources"`
+}
+
+// ReadResourceParams represents params for resources/read request
+type ReadResourceParams struct {
+	URI string `json:"uri"`
+}
+
+// ResourceContent represents content in resource read result
+type ResourceContent struct {
+	URI      string `json:"uri"`
+	MimeType string `json:"mimeType,omitempty"`
+	Text     string `json:"text,omitempty"`
+	Blob     string `json:"blob,omitempty"`
+}
+
+// ReadResourceResult represents the result of resources/read request
+type ReadResourceResult struct {
+	Contents []ResourceContent `json:"contents"`
 }

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/takeshy/mcp-gatekeeper/internal/db"
+	"github.com/takeshy/mcp-gatekeeper/internal/plugin"
 )
 
 const (
@@ -301,10 +301,34 @@ func (e *Executor) IsSandboxed() bool {
 	return e.sandbox != nil && e.sandbox.Mode() == SandboxBwrap
 }
 
+// PrepareSandbox prepares sandbox mount directories if using bubblewrap
+func (e *Executor) PrepareSandbox() error {
+	if e.sandbox != nil {
+		return e.sandbox.PrepareMountDirs()
+	}
+	return nil
+}
+
+// Cleanup removes any directories created for sandboxing
+func (e *Executor) Cleanup() error {
+	if e.sandbox != nil {
+		return e.sandbox.Cleanup()
+	}
+	return nil
+}
+
+// GetSandboxCreatedDirs returns the list of directories created for sandboxing
+func (e *Executor) GetSandboxCreatedDirs() []string {
+	if e.sandbox != nil {
+		return e.sandbox.CreatedDirs()
+	}
+	return nil
+}
+
 // ExecuteWithSandbox executes a command using the specified sandbox type from the tool
-func (e *Executor) ExecuteWithSandbox(ctx context.Context, cwd, cmd string, args []string, env []string, sandboxType db.SandboxType, wasmBinary string) (*ExecuteResult, error) {
+func (e *Executor) ExecuteWithSandbox(ctx context.Context, cwd, cmd string, args []string, env []string, sandboxType plugin.SandboxType, wasmBinary string) (*ExecuteResult, error) {
 	switch sandboxType {
-	case db.SandboxTypeWasm:
+	case plugin.SandboxTypeWasm:
 		if e.wasmExecutor == nil {
 			return nil, fmt.Errorf("WASM executor not initialized (root directory not set)")
 		}
@@ -314,11 +338,11 @@ func (e *Executor) ExecuteWithSandbox(ctx context.Context, cwd, cmd string, args
 		// For WASM, the wasmBinary is the WASM file to execute, and args are passed to it
 		return e.wasmExecutor.Execute(ctx, wasmBinary, cwd, args, env, e.config.Timeout, e.config.MaxOutput)
 
-	case db.SandboxTypeNone:
+	case plugin.SandboxTypeNone:
 		// Execute without any sandbox
 		return e.executeWithoutSandbox(ctx, cwd, cmd, args, env)
 
-	case db.SandboxTypeBubblewrap:
+	case plugin.SandboxTypeBubblewrap:
 		// Execute with bubblewrap sandbox
 		return e.executeWithBwrap(ctx, cwd, cmd, args, env)
 

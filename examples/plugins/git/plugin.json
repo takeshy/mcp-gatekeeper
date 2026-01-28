@@ -1,0 +1,86 @@
+{
+  "tools": [
+    {
+      "name": "git-status",
+      "description": "Show git repository status",
+      "command": "git",
+      "args_prefix": ["status"],
+      "allowed_arg_globs": ["", "*"],
+      "sandbox": "none",
+      "ui_type": "log"
+    },
+    {
+      "name": "git-log",
+      "description": "Show git commit log",
+      "command": "git",
+      "args_prefix": ["log"],
+      "allowed_arg_globs": ["", "*"],
+      "sandbox": "none",
+      "ui_template": "templates/log.html"
+    },
+    {
+      "name": "git-branch",
+      "description": "List git branches",
+      "command": "git",
+      "args_prefix": ["branch"],
+      "allowed_arg_globs": ["", "*"],
+      "sandbox": "none",
+      "ui_type": "log"
+    },
+    {
+      "name": "git-diff",
+      "description": "Show git diff",
+      "command": "git",
+      "args_prefix": ["diff"],
+      "allowed_arg_globs": ["", "*"],
+      "sandbox": "none",
+      "ui_template": "templates/diff.html"
+    },
+    {
+      "name": "git-stash",
+      "description": "List git stashes",
+      "command": "git",
+      "args_prefix": ["stash", "list"],
+      "allowed_arg_globs": ["", "*"],
+      "sandbox": "none",
+      "ui_type": "log"
+    },
+    {
+      "name": "git-remote",
+      "description": "Show git remotes",
+      "command": "git",
+      "args_prefix": ["remote"],
+      "allowed_arg_globs": ["", "*"],
+      "sandbox": "none",
+      "ui_type": "log"
+    },
+    {
+      "name": "git-tag",
+      "description": "List git tags",
+      "command": "git",
+      "args_prefix": ["tag"],
+      "allowed_arg_globs": ["", "*"],
+      "sandbox": "none",
+      "ui_type": "log"
+    },
+    {
+      "name": "git-show",
+      "description": "Show git object details",
+      "command": "git",
+      "args_prefix": ["show"],
+      "allowed_arg_globs": ["", "*"],
+      "sandbox": "none",
+      "ui_type": "log"
+    },
+    {
+      "name": "git-blame",
+      "description": "Show file blame",
+      "command": "git",
+      "args_prefix": ["blame"],
+      "allowed_arg_globs": ["*"],
+      "sandbox": "none",
+      "ui_type": "log"
+    }
+  ],
+  "allowed_env_keys": ["HOME", "USER", "PATH", "GIT_*", "LANG", "LC_*"]
+}

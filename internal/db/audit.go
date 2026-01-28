@@ -1,227 +1,150 @@
 package db
 
 import (
-	"database/sql"
 	"encoding/json"
-	"fmt"
 	"time"
 )
 
-// Decision represents the allow/deny decision
-type Decision string
+// AuditMode represents the server mode for audit logging
+type AuditMode string
 
 const (
-	DecisionAllow Decision = "allow"
-	DecisionDeny  Decision = "deny"
+	AuditModeBridge AuditMode = "bridge"
+	AuditModeHTTP   AuditMode = "http"
+	AuditModeStdio  AuditMode = "stdio"
 )
 
-// AuditLog represents an audit log record
-type AuditLog struct {
-	ID                int64
-	APIKeyID          int64
-	RequestedCwd      string
-	RequestedCmd      string
-	RequestedArgs     []string
-	NormalizedCwd     string
-	NormalizedCmdline string
-	Decision          Decision
-	MatchedRules      []string
-	Stdout            string
-	Stderr            string
-	ExitCode          sql.NullInt64
-	DurationMs        sql.NullInt64
-	CreatedAt         time.Time
+// AuditEntry represents a single audit log entry
+type AuditEntry struct {
+	ID           int64
+	Mode         AuditMode
+	Method       string
+	ToolName     string
+	Params       string
+	Response     string
+	Error        string
+	RequestSize  int
+	ResponseSize int
+	DurationMs   int64
+	CreatedAt    time.Time
 }
 
-// CreateAuditLog creates a new audit log entry
-func (db *DB) CreateAuditLog(log *AuditLog) (*AuditLog, error) {
-	requestedArgsJSON, err := json.Marshal(log.RequestedArgs)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal requested_args: %w", err)
-	}
-	matchedRulesJSON, err := json.Marshal(log.MatchedRules)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal matched_rules: %w", err)
+// LogAudit creates an audit log entry
+func (d *DB) LogAudit(mode AuditMode, method string, toolName string, params interface{}, response interface{}, err error, startTime time.Time) error {
+	duration := time.Since(startTime).Milliseconds()
+
+	var paramsJSON string
+	var responseJSON string
+	var errorStr string
+	var requestSize int
+	var responseSize int
+
+	if params != nil {
+		if data, marshalErr := json.Marshal(params); marshalErr == nil {
+			paramsJSON = string(data)
+			requestSize = len(data)
+		}
 	}
 
-	result, err := db.Exec(`
-		INSERT INTO audit_logs (
-			api_key_id, requested_cwd, requested_cmd, requested_args,
-			normalized_cwd, normalized_cmdline, decision, matched_rules,
-			stdout, stderr, exit_code, duration_ms
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
-		log.APIKeyID, log.RequestedCwd, log.RequestedCmd, string(requestedArgsJSON),
-		log.NormalizedCwd, log.NormalizedCmdline, string(log.Decision), string(matchedRulesJSON),
-		log.Stdout, log.Stderr, log.ExitCode, log.DurationMs,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create audit log: %w", err)
+	if response != nil {
+		if data, marshalErr := json.Marshal(response); marshalErr == nil {
+			responseJSON = string(data)
+			responseSize = len(data)
+		}
 	}
 
-	id, err := result.LastInsertId()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get audit log ID: %w", err)
+		errorStr = err.Error()
 	}
 
-	log.ID = id
-	return log, nil
+	_, execErr := d.db.Exec(`
+		INSERT INTO audit_logs (mode, method, tool_name, params, response, error, request_size, response_size, duration_ms)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, string(mode), method, toolName, paramsJSON, responseJSON, errorStr, requestSize, responseSize, duration)
+
+	return execErr
 }
 
-// GetAuditLogByID retrieves an audit log by ID
-func (db *DB) GetAuditLogByID(id int64) (*AuditLog, error) {
-	var (
-		requestedArgsJSON string
-		matchedRulesJSON  string
-		decision          string
-	)
+// ListAuditLogs retrieves audit logs with optional filtering
+func (d *DB) ListAuditLogs(mode AuditMode, limit int, offset int) ([]*AuditEntry, error) {
+	query := `
+		SELECT id, mode, method, tool_name, params, response, error, request_size, response_size, duration_ms, created_at
+		FROM audit_logs
+	`
+	var args []interface{}
 
-	log := &AuditLog{}
-	err := db.QueryRow(`
-		SELECT id, api_key_id, requested_cwd, requested_cmd, requested_args,
-			normalized_cwd, normalized_cmdline, decision, matched_rules,
-			stdout, stderr, exit_code, duration_ms, created_at
-		FROM audit_logs WHERE id = ?
-	`, id).Scan(
-		&log.ID, &log.APIKeyID, &log.RequestedCwd, &log.RequestedCmd, &requestedArgsJSON,
-		&log.NormalizedCwd, &log.NormalizedCmdline, &decision, &matchedRulesJSON,
-		&log.Stdout, &log.Stderr, &log.ExitCode, &log.DurationMs, &log.CreatedAt,
-	)
-	if err == sql.ErrNoRows {
-		return nil, nil
+	if mode != "" {
+		query += " WHERE mode = ?"
+		args = append(args, string(mode))
 	}
+
+	query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+	args = append(args, limit, offset)
+
+	rows, err := d.db.Query(query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get audit log: %w", err)
-	}
-
-	log.Decision = Decision(decision)
-
-	if err := json.Unmarshal([]byte(requestedArgsJSON), &log.RequestedArgs); err != nil {
-		return nil, fmt.Errorf("failed to parse requested_args: %w", err)
-	}
-	if err := json.Unmarshal([]byte(matchedRulesJSON), &log.MatchedRules); err != nil {
-		return nil, fmt.Errorf("failed to parse matched_rules: %w", err)
-	}
-
-	return log, nil
-}
-
-// ListAuditLogs retrieves audit logs with pagination
-func (db *DB) ListAuditLogs(limit, offset int) ([]*AuditLog, error) {
-	rows, err := db.Query(`
-		SELECT id, api_key_id, requested_cwd, requested_cmd, requested_args,
-			normalized_cwd, normalized_cmdline, decision, matched_rules,
-			stdout, stderr, exit_code, duration_ms, created_at
-		FROM audit_logs ORDER BY created_at DESC LIMIT ? OFFSET ?
-	`, limit, offset)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list audit logs: %w", err)
+		return nil, err
 	}
 	defer rows.Close()
 
-	var logs []*AuditLog
+	var entries []*AuditEntry
 	for rows.Next() {
-		var (
-			requestedArgsJSON string
-			matchedRulesJSON  string
-			decision          string
-		)
-		log := &AuditLog{}
-		err := rows.Scan(
-			&log.ID, &log.APIKeyID, &log.RequestedCwd, &log.RequestedCmd, &requestedArgsJSON,
-			&log.NormalizedCwd, &log.NormalizedCmdline, &decision, &matchedRulesJSON,
-			&log.Stdout, &log.Stderr, &log.ExitCode, &log.DurationMs, &log.CreatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan audit log: %w", err)
+		entry := &AuditEntry{}
+		var toolName, params, response, errorStr *string
+		if err := rows.Scan(
+			&entry.ID,
+			&entry.Mode,
+			&entry.Method,
+			&toolName,
+			&params,
+			&response,
+			&errorStr,
+			&entry.RequestSize,
+			&entry.ResponseSize,
+			&entry.DurationMs,
+			&entry.CreatedAt,
+		); err != nil {
+			return nil, err
 		}
-
-		log.Decision = Decision(decision)
-
-		if err := json.Unmarshal([]byte(requestedArgsJSON), &log.RequestedArgs); err != nil {
-			return nil, fmt.Errorf("failed to parse requested_args: %w", err)
+		if toolName != nil {
+			entry.ToolName = *toolName
 		}
-		if err := json.Unmarshal([]byte(matchedRulesJSON), &log.MatchedRules); err != nil {
-			return nil, fmt.Errorf("failed to parse matched_rules: %w", err)
+		if params != nil {
+			entry.Params = *params
 		}
-
-		logs = append(logs, log)
+		if response != nil {
+			entry.Response = *response
+		}
+		if errorStr != nil {
+			entry.Error = *errorStr
+		}
+		entries = append(entries, entry)
 	}
-	return logs, rows.Err()
+
+	return entries, nil
 }
 
-// ListAuditLogsByAPIKey retrieves audit logs for a specific API key
-func (db *DB) ListAuditLogsByAPIKey(apiKeyID int64, limit, offset int) ([]*AuditLog, error) {
-	rows, err := db.Query(`
-		SELECT id, api_key_id, requested_cwd, requested_cmd, requested_args,
-			normalized_cwd, normalized_cmdline, decision, matched_rules,
-			stdout, stderr, exit_code, duration_ms, created_at
-		FROM audit_logs WHERE api_key_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?
-	`, apiKeyID, limit, offset)
+// GetAuditStats returns statistics about audit logs
+func (d *DB) GetAuditStats() (map[AuditMode]int64, error) {
+	rows, err := d.db.Query(`
+		SELECT mode, COUNT(*) as count
+		FROM audit_logs
+		GROUP BY mode
+	`)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list audit logs: %w", err)
+		return nil, err
 	}
 	defer rows.Close()
 
-	var logs []*AuditLog
+	stats := make(map[AuditMode]int64)
 	for rows.Next() {
-		var (
-			requestedArgsJSON string
-			matchedRulesJSON  string
-			decision          string
-		)
-		log := &AuditLog{}
-		err := rows.Scan(
-			&log.ID, &log.APIKeyID, &log.RequestedCwd, &log.RequestedCmd, &requestedArgsJSON,
-			&log.NormalizedCwd, &log.NormalizedCmdline, &decision, &matchedRulesJSON,
-			&log.Stdout, &log.Stderr, &log.ExitCode, &log.DurationMs, &log.CreatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan audit log: %w", err)
+		var mode string
+		var count int64
+		if err := rows.Scan(&mode, &count); err != nil {
+			return nil, err
 		}
-
-		log.Decision = Decision(decision)
-
-		if err := json.Unmarshal([]byte(requestedArgsJSON), &log.RequestedArgs); err != nil {
-			return nil, fmt.Errorf("failed to parse requested_args: %w", err)
-		}
-		if err := json.Unmarshal([]byte(matchedRulesJSON), &log.MatchedRules); err != nil {
-			return nil, fmt.Errorf("failed to parse matched_rules: %w", err)
-		}
-
-		logs = append(logs, log)
+		stats[AuditMode(mode)] = count
 	}
-	return logs, rows.Err()
-}
 
-// CountAuditLogs returns the total count of audit logs
-func (db *DB) CountAuditLogs() (int64, error) {
-	var count int64
-	err := db.QueryRow("SELECT COUNT(*) FROM audit_logs").Scan(&count)
-	if err != nil {
-		return 0, fmt.Errorf("failed to count audit logs: %w", err)
-	}
-	return count, nil
-}
-
-// CountAuditLogsByAPIKey returns the count of audit logs for a specific API key
-func (db *DB) CountAuditLogsByAPIKey(apiKeyID int64) (int64, error) {
-	var count int64
-	err := db.QueryRow("SELECT COUNT(*) FROM audit_logs WHERE api_key_id = ?", apiKeyID).Scan(&count)
-	if err != nil {
-		return 0, fmt.Errorf("failed to count audit logs: %w", err)
-	}
-	return count, nil
-}
-
-// UpdateAuditLogResult updates the execution result of an audit log
-func (db *DB) UpdateAuditLogResult(id int64, stdout, stderr string, exitCode int, durationMs int64) error {
-	_, err := db.Exec(`
-		UPDATE audit_logs SET stdout = ?, stderr = ?, exit_code = ?, duration_ms = ?
-		WHERE id = ?
-	`, stdout, stderr, exitCode, durationMs, id)
-	if err != nil {
-		return fmt.Errorf("failed to update audit log result: %w", err)
-	}
-	return nil
+	return stats, nil
 }

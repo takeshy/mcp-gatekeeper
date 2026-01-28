@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"sort"
 	"strings"
 
 	_ "modernc.org/sqlite"
@@ -12,98 +13,113 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
-// DB wraps the SQLite database connection
+// DB wraps a SQLite database connection
 type DB struct {
-	*sql.DB
+	db *sql.DB
 }
 
-// Open opens a SQLite database connection and runs migrations
-func Open(dbPath string) (*DB, error) {
-	conn, err := sql.Open("sqlite", dbPath)
+// Open opens or creates a SQLite database at the given path
+func Open(path string) (*DB, error) {
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	// Enable foreign keys
-	if _, err := conn.Exec("PRAGMA foreign_keys = ON"); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("failed to enable foreign keys: %w", err)
+	// Enable WAL mode for better concurrency
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to enable WAL mode: %w", err)
 	}
 
-	db := &DB{conn}
+	d := &DB{db: db}
 
-	if err := db.runMigrations(); err != nil {
-		conn.Close()
+	if err := d.migrate(); err != nil {
+		db.Close()
 		return nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
 
-	return db, nil
+	return d, nil
 }
 
-// runMigrations applies all pending migrations
-func (db *DB) runMigrations() error {
-	// Create schema_migrations table if not exists
-	_, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS schema_migrations (
-			version INTEGER PRIMARY KEY,
+// Close closes the database connection
+func (d *DB) Close() error {
+	return d.db.Close()
+}
+
+// migrate runs all pending migrations
+func (d *DB) migrate() error {
+	// Create migrations table if not exists
+	_, err := d.db.Exec(`
+		CREATE TABLE IF NOT EXISTS migrations (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL UNIQUE,
 			applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)
 	`)
 	if err != nil {
-		return fmt.Errorf("failed to create schema_migrations table: %w", err)
+		return fmt.Errorf("failed to create migrations table: %w", err)
 	}
 
-	// Get current version
-	var currentVersion int
-	err = db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&currentVersion)
+	// Get list of applied migrations
+	rows, err := d.db.Query("SELECT name FROM migrations")
 	if err != nil {
-		return fmt.Errorf("failed to get current schema version: %w", err)
+		return fmt.Errorf("failed to query migrations: %w", err)
+	}
+	defer rows.Close()
+
+	applied := make(map[string]bool)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return fmt.Errorf("failed to scan migration name: %w", err)
+		}
+		applied[name] = true
 	}
 
-	// Read and apply migrations
+	// Read migration files
 	entries, err := migrationsFS.ReadDir("migrations")
 	if err != nil {
-		return fmt.Errorf("failed to read migrations directory: %w", err)
+		return fmt.Errorf("failed to read migrations: %w", err)
 	}
 
+	// Sort entries by name
+	var names []string
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+		if strings.HasSuffix(entry.Name(), ".sql") {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Strings(names)
+
+	// Apply pending migrations
+	for _, name := range names {
+		if applied[name] {
 			continue
 		}
 
-		// Parse version from filename (e.g., "001_initial.sql" -> 1)
-		var version int
-		if _, err := fmt.Sscanf(entry.Name(), "%03d_", &version); err != nil {
-			continue
-		}
-
-		if version <= currentVersion {
-			continue
-		}
-
-		// Read and execute migration
-		content, err := migrationsFS.ReadFile("migrations/" + entry.Name())
+		content, err := migrationsFS.ReadFile("migrations/" + name)
 		if err != nil {
-			return fmt.Errorf("failed to read migration %s: %w", entry.Name(), err)
+			return fmt.Errorf("failed to read migration %s: %w", name, err)
 		}
 
-		tx, err := db.Begin()
+		// Execute migration in a transaction
+		tx, err := d.db.Begin()
 		if err != nil {
-			return fmt.Errorf("failed to begin transaction for migration %s: %w", entry.Name(), err)
+			return fmt.Errorf("failed to begin transaction: %w", err)
 		}
 
 		if _, err := tx.Exec(string(content)); err != nil {
 			tx.Rollback()
-			return fmt.Errorf("failed to execute migration %s: %w", entry.Name(), err)
+			return fmt.Errorf("failed to execute migration %s: %w", name, err)
 		}
 
-		if _, err := tx.Exec("INSERT OR REPLACE INTO schema_migrations (version) VALUES (?)", version); err != nil {
+		if _, err := tx.Exec("INSERT INTO migrations (name) VALUES (?)", name); err != nil {
 			tx.Rollback()
-			return fmt.Errorf("failed to record migration %s: %w", entry.Name(), err)
+			return fmt.Errorf("failed to record migration %s: %w", name, err)
 		}
 
 		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("failed to commit migration %s: %w", entry.Name(), err)
+			return fmt.Errorf("failed to commit migration %s: %w", name, err)
 		}
 	}
 

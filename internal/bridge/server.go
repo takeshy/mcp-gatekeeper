@@ -26,7 +26,7 @@ type Server struct {
 	maxResponseSize int
 	fileStore       *FileStore
 	debug           bool
-	db              *db.DB
+	db              *db.DB // Optional database for audit logging
 	mu              sync.RWMutex
 }
 
@@ -43,11 +43,9 @@ type ServerConfig struct {
 	Timeout         time.Duration
 	RateLimit       int
 	RateLimitWindow time.Duration
-	MaxResponseSize int  // Max response size in bytes (default 500000)
-	Debug           bool // Enable debug logging
-
-	// Database for audit logging (optional)
-	DB *db.DB
+	MaxResponseSize int    // Max response size in bytes (default 500000)
+	Debug           bool   // Enable debug logging
+	DB              *db.DB // Optional database for audit logging
 }
 
 // RateLimiter implements a sliding window rate limiter using a ring buffer
@@ -503,36 +501,22 @@ func (s *Server) logAudit(method string, params string, resp *Response, err erro
 		return
 	}
 
-	durationMs := time.Since(startTime).Milliseconds()
-
-	var respStr string
-	var errStr string
-	var responseSize int64
-
-	if resp != nil {
-		respJSON, _ := json.Marshal(resp)
-		respStr = string(respJSON)
-		responseSize = int64(len(respJSON))
+	// Extract tool name from params if this is a tools/call request
+	// params contains the full JSON-RPC request body
+	var toolName string
+	if method == "tools/call" {
+		var req struct {
+			Params struct {
+				Name string `json:"name"`
+			} `json:"params"`
+		}
+		if jsonErr := json.Unmarshal([]byte(params), &req); jsonErr == nil {
+			toolName = req.Params.Name
+		}
 	}
 
-	if err != nil {
-		errStr = err.Error()
-	} else if resp != nil && resp.Error != nil {
-		errStr = resp.Error.Message
-	}
-
-	auditLog := &db.BridgeAuditLog{
-		Method:       method,
-		Params:       params,
-		Response:     respStr,
-		Error:        errStr,
-		RequestSize:  int64(len(params)),
-		ResponseSize: responseSize,
-		DurationMs:   durationMs,
-	}
-
-	if _, logErr := s.db.CreateBridgeAuditLog(auditLog); logErr != nil {
-		fmt.Fprintf(os.Stderr, "[bridge] failed to log audit: %v\n", logErr)
+	if logErr := s.db.LogAudit(db.AuditModeBridge, method, toolName, params, resp, err, startTime); logErr != nil {
+		fmt.Fprintf(os.Stderr, "[WARN] Failed to log audit: %v\n", logErr)
 	}
 }
 
@@ -593,9 +577,21 @@ func (s *Server) externalizeLargeContent(resp *Response, host string) *Response 
 			data, hasData := item["data"].(string)
 			mimeType, _ := item["mimeType"].(string)
 
-			// Check if we have a full-size file path
+			// Check if we have a full-size file path that exceeds MaxContentSize
 			var usedFullFile bool
 			for _, filePath := range imageFilePaths {
+				// Check file size first before storing
+				fileInfo, err := os.Stat(filePath)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[bridge] failed to stat file %s: %v\n", filePath, err)
+					continue
+				}
+				// Skip if file is small enough to keep inline
+				if fileInfo.Size() <= MaxContentSize {
+					fmt.Fprintf(os.Stderr, "[bridge] file %s is small (%d bytes), keeping inline\n", filePath, fileInfo.Size())
+					continue
+				}
+
 				key, detectedMime, size, err := s.fileStore.StoreFile(filePath)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "[bridge] failed to store file %s: %v\n", filePath, err)
@@ -721,11 +717,14 @@ func (s *Server) externalizeLargeContent(resp *Response, host string) *Response 
 		return resp
 	}
 
-	// Rebuild the result with filtered content
-	newResult := map[string]interface{}{
-		"content": filteredContent,
+	// Rebuild the result preserving all original fields (including _meta for MCP Apps)
+	var originalResult map[string]interface{}
+	if err := json.Unmarshal(resp.Result, &originalResult); err != nil {
+		return resp
 	}
-	newResultJSON, err := json.Marshal(newResult)
+	originalResult["content"] = filteredContent
+
+	newResultJSON, err := json.Marshal(originalResult)
 	if err != nil {
 		return resp
 	}

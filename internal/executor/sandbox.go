@@ -24,9 +24,10 @@ const (
 
 // Sandbox provides command sandboxing functionality
 type Sandbox struct {
-	mode    SandboxMode
-	rootDir string
-	bwrap   string // path to bwrap binary
+	mode        SandboxMode
+	rootDir     string
+	bwrap       string   // path to bwrap binary
+	createdDirs []string // directories created for bwrap mounts
 }
 
 // SandboxConfig holds sandbox configuration
@@ -226,4 +227,67 @@ func (s *Sandbox) validatePath(path string) error {
 // ValidatePath is a public wrapper for path validation
 func (s *Sandbox) ValidatePath(path string) error {
 	return s.validatePath(path)
+}
+
+// bwrapMountDirs returns the list of directories that bwrap needs as mount points
+func bwrapMountDirs() []string {
+	dirs := []string{"usr", "bin", "lib", "etc", "dev", "tmp"}
+	// Add lib64 if it exists on the host
+	if _, err := os.Stat("/lib64"); err == nil {
+		dirs = append(dirs, "lib64")
+	}
+	// Add sbin if it exists on the host
+	if _, err := os.Stat("/sbin"); err == nil {
+		dirs = append(dirs, "sbin")
+	}
+	return dirs
+}
+
+// PrepareMountDirs creates the directories needed for bwrap mounts
+// Returns the list of directories that were created (not pre-existing)
+func (s *Sandbox) PrepareMountDirs() error {
+	if s.mode != SandboxBwrap {
+		return nil
+	}
+
+	s.createdDirs = nil
+	for _, dir := range bwrapMountDirs() {
+		path := filepath.Join(s.rootDir, dir)
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			if err := os.MkdirAll(path, 0755); err != nil {
+				// Cleanup already created dirs on failure
+				s.Cleanup()
+				return fmt.Errorf("failed to create mount directory %s: %w", path, err)
+			}
+			s.createdDirs = append(s.createdDirs, path)
+		}
+	}
+	return nil
+}
+
+// Cleanup removes directories that were created by PrepareMountDirs
+func (s *Sandbox) Cleanup() error {
+	var lastErr error
+	// Remove in reverse order (in case of nested dirs)
+	for i := len(s.createdDirs) - 1; i >= 0; i-- {
+		path := s.createdDirs[i]
+		// Only remove if directory is empty
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if len(entries) == 0 {
+			if err := os.Remove(path); err != nil {
+				lastErr = err
+			}
+		}
+	}
+	s.createdDirs = nil
+	return lastErr
+}
+
+// CreatedDirs returns the list of directories created by PrepareMountDirs
+func (s *Sandbox) CreatedDirs() []string {
+	return s.createdDirs
 }

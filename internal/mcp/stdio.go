@@ -3,15 +3,17 @@ package mcp
 import (
 	"bufio"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"time"
 
-	"github.com/takeshy/mcp-gatekeeper/internal/auth"
 	"github.com/takeshy/mcp-gatekeeper/internal/db"
 	"github.com/takeshy/mcp-gatekeeper/internal/executor"
+	"github.com/takeshy/mcp-gatekeeper/internal/plugin"
 	"github.com/takeshy/mcp-gatekeeper/internal/policy"
 )
 
@@ -23,28 +25,26 @@ const (
 
 // StdioServer implements the MCP server over stdio
 type StdioServer struct {
-	db          *db.DB
-	auth        *auth.Authenticator
+	plugins     *plugin.Config
 	evaluator   *policy.Evaluator
 	executor    *executor.Executor
 	initialized bool
-	apiKey      *db.APIKey
 	reader      *bufio.Reader
 	writer      io.Writer
 	rootDir     string
+	db          *db.DB // Optional database for audit logging
 }
 
 // NewStdioServer creates a new stdio MCP server
-func NewStdioServer(database *db.DB, apiKeyStr string, rootDir string, wasmDir string) (*StdioServer, error) {
-	authenticator := auth.NewAuthenticator(database)
-
-	// Authenticate API key
-	apiKey, err := authenticator.Authenticate(apiKeyStr)
-	if err != nil {
-		return nil, fmt.Errorf("failed to authenticate: %w", err)
-	}
-	if apiKey == nil {
-		return nil, fmt.Errorf("invalid API key")
+func NewStdioServer(plugins *plugin.Config, apiKey string, expectedAPIKey string, rootDir string, wasmDir string, database *db.DB) (*StdioServer, error) {
+	// Validate API key if expected key is set
+	if expectedAPIKey != "" {
+		if apiKey == "" {
+			return nil, fmt.Errorf("API key required")
+		}
+		if subtle.ConstantTimeCompare([]byte(apiKey), []byte(expectedAPIKey)) != 1 {
+			return nil, fmt.Errorf("invalid API key")
+		}
 	}
 
 	execConfig := &executor.ExecutorConfig{
@@ -55,14 +55,13 @@ func NewStdioServer(database *db.DB, apiKeyStr string, rootDir string, wasmDir s
 	}
 
 	return &StdioServer{
-		db:        database,
-		auth:      authenticator,
+		plugins:   plugins,
 		evaluator: policy.NewEvaluator(),
 		executor:  executor.NewExecutor(execConfig),
-		apiKey:    apiKey,
 		reader:    bufio.NewReader(os.Stdin),
 		writer:    os.Stdout,
 		rootDir:   rootDir,
+		db:        database,
 	}, nil
 }
 
@@ -146,6 +145,10 @@ func (s *StdioServer) handleRequest(ctx context.Context, req *Request) (*Respons
 		return s.handleToolsList(req)
 	case "tools/call":
 		return s.handleToolsCall(ctx, req)
+	case "resources/list":
+		return s.handleResourcesList(req)
+	case "resources/read":
+		return s.handleResourcesRead(req)
 	case "ping":
 		return NewResponse(req.ID, struct{}{}), nil
 	default:
@@ -154,13 +157,23 @@ func (s *StdioServer) handleRequest(ctx context.Context, req *Request) (*Respons
 }
 
 func (s *StdioServer) handleInitialize(req *Request) (*Response, error) {
+	caps := ServerCapabilities{
+		Tools: &ToolsCapability{
+			ListChanged: false,
+		},
+	}
+
+	// Add resources capability if any tool has UI enabled
+	if s.hasUIEnabledTools() {
+		caps.Resources = &ResourcesCapability{
+			Subscribe:   false,
+			ListChanged: false,
+		}
+	}
+
 	result := &InitializeResult{
 		ProtocolVersion: ProtocolVersion,
-		Capabilities: ServerCapabilities{
-			Tools: &ToolsCapability{
-				ListChanged: false,
-			},
-		},
+		Capabilities:    caps,
 		ServerInfo: ServerInfo{
 			Name:    ServerName,
 			Version: ServerVersion,
@@ -169,15 +182,21 @@ func (s *StdioServer) handleInitialize(req *Request) (*Response, error) {
 	return NewResponse(req.ID, result), nil
 }
 
-func (s *StdioServer) handleToolsList(req *Request) (*Response, error) {
-	// Get tools from database for this API key
-	dbTools, err := s.db.ListToolsByAPIKeyID(s.apiKey.ID)
-	if err != nil {
-		return NewErrorResponse(req.ID, InternalError, "Failed to list tools", err.Error()), nil
+func (s *StdioServer) hasUIEnabledTools() bool {
+	for _, t := range s.plugins.ListTools() {
+		if t.UIType != "" || t.UITemplate != "" {
+			return true
+		}
 	}
+	return false
+}
 
-	tools := make([]Tool, len(dbTools))
-	for i, t := range dbTools {
+func (s *StdioServer) handleToolsList(req *Request) (*Response, error) {
+	// Get tools from plugins
+	pluginTools := s.plugins.ListTools()
+
+	tools := make([]Tool, len(pluginTools))
+	for i, t := range pluginTools {
 		tools[i] = Tool{
 			Name:        t.Name,
 			Description: t.Description,
@@ -196,33 +215,35 @@ func (s *StdioServer) handleToolsList(req *Request) (*Response, error) {
 				},
 				Required: []string{},
 			},
+			Meta: BuildToolMeta(t),
 		}
 	}
 	return NewResponse(req.ID, &ListToolsResult{Tools: tools}), nil
 }
 
 func (s *StdioServer) handleToolsCall(ctx context.Context, req *Request) (*Response, error) {
+	startTime := time.Now()
 	var params CallToolParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		fmt.Fprintf(os.Stderr, "[ERROR] Invalid params: %v\n", err)
-		return NewErrorResponse(req.ID, InvalidParams, "Invalid params", err.Error()), nil
+		resp := NewErrorResponse(req.ID, InvalidParams, "Invalid params", err.Error())
+		s.logAudit(req.Method, params.Name, req.Params, resp, err, startTime)
+		return resp, nil
 	}
 
-	// Look up tool by name for this API key
-	tool, err := s.db.GetToolByAPIKeyAndName(s.apiKey.ID, params.Name)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[ERROR] Failed to get tool: %v\n", err)
-		return NewErrorResponse(req.ID, InternalError, "Failed to get tool", err.Error()), nil
-	}
+	// Look up tool by name from plugins
+	tool := s.plugins.GetTool(params.Name)
 	if tool == nil {
-		fmt.Fprintf(os.Stderr, "[ERROR] Tool not found: %s for apiKey=%s\n", params.Name, s.apiKey.Name)
-		return NewErrorResponse(req.ID, MethodNotFound, "Tool not found", params.Name), nil
+		fmt.Fprintf(os.Stderr, "[ERROR] Tool not found: %s\n", params.Name)
+		resp := NewErrorResponse(req.ID, MethodNotFound, "Tool not found", params.Name)
+		s.logAudit(req.Method, params.Name, req.Params, resp, fmt.Errorf("tool not found: %s", params.Name), startTime)
+		return resp, nil
 	}
 
-	return s.handleExecute(ctx, req.ID, tool, params.Arguments)
+	return s.handleExecute(ctx, req.ID, req.Method, tool, params.Arguments, req.Params, startTime)
 }
 
-func (s *StdioServer) handleExecute(ctx context.Context, id json.RawMessage, tool *db.Tool, args map[string]interface{}) (*Response, error) {
+func (s *StdioServer) handleExecute(ctx context.Context, id json.RawMessage, method string, tool *plugin.Tool, args map[string]interface{}, rawParams json.RawMessage, startTime time.Time) (*Response, error) {
 	// Parse arguments
 	cwd, _ := args["cwd"].(string)
 	var cmdArgs []string
@@ -239,53 +260,38 @@ func (s *StdioServer) handleExecute(ctx context.Context, id json.RawMessage, too
 		cwd = s.rootDir
 	}
 
-	// Evaluate policy (check if args are allowed)
+	// Evaluate policy (check if user-provided args are allowed)
 	decision, err := s.evaluator.EvaluateArgs(tool, cmdArgs)
 	if err != nil {
-		return NewErrorResponse(id, InternalError, "Policy evaluation failed", err.Error()), nil
-	}
-
-	// Create audit log
-	auditLog := &db.AuditLog{
-		APIKeyID:          s.apiKey.ID,
-		RequestedCwd:      cwd,
-		RequestedCmd:      tool.Command,
-		RequestedArgs:     cmdArgs,
-		NormalizedCwd:     cwd,
-		NormalizedCmdline: tool.Command + " " + strings.Join(cmdArgs, " "),
-		MatchedRules:      decision.MatchedRules,
+		resp := NewErrorResponse(id, InternalError, "Policy evaluation failed", err.Error())
+		s.logAudit(method, tool.Name, rawParams, resp, err, startTime)
+		return resp, nil
 	}
 
 	if !decision.Allowed {
 		fmt.Fprintf(os.Stderr, "[WARN] Arguments denied by policy: %s\n", decision.Reason)
-		auditLog.Decision = db.DecisionDeny
-		s.db.CreateAuditLog(auditLog)
-		return NewErrorResponse(id, PolicyDenied, "Arguments denied by policy", decision.Reason), nil
+		resp := NewErrorResponse(id, PolicyDenied, "Arguments denied by policy", decision.Reason)
+		s.logAudit(method, tool.Name, rawParams, resp, fmt.Errorf("policy denied: %s", decision.Reason), startTime)
+		return resp, nil
 	}
 
-	auditLog.Decision = db.DecisionAllow
-
 	// Filter environment variables
-	filteredEnvKeys := s.evaluator.FilterEnvKeys(s.apiKey.AllowedEnvKeys, getEnvKeys(os.Environ()))
+	filteredEnvKeys := s.evaluator.FilterEnvKeys(s.plugins.AllowedEnvKeys, getEnvKeys(os.Environ()))
 	filteredEnv := filterEnvByKeys(os.Environ(), filteredEnvKeys)
+
+	// Prepend args_prefix if defined (after policy evaluation)
+	if len(tool.ArgsPrefix) > 0 {
+		cmdArgs = append(tool.ArgsPrefix, cmdArgs...)
+	}
 
 	// Execute command using the tool's sandbox setting
 	result, err := s.executor.ExecuteWithSandbox(ctx, cwd, tool.Command, cmdArgs, filteredEnv, tool.Sandbox, tool.WasmBinary)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[ERROR] Execution failed: %v\n", err)
-		auditLog.Stderr = err.Error()
-		s.db.CreateAuditLog(auditLog)
-		return NewErrorResponse(id, ExecutionFailed, "Execution failed", err.Error()), nil
+		resp := NewErrorResponse(id, ExecutionFailed, "Execution failed", err.Error())
+		s.logAudit(method, tool.Name, rawParams, resp, err, startTime)
+		return resp, nil
 	}
-
-	// Update audit log with result
-	auditLog.Stdout = result.Stdout
-	auditLog.Stderr = result.Stderr
-	auditLog.ExitCode.Int64 = int64(result.ExitCode)
-	auditLog.ExitCode.Valid = true
-	auditLog.DurationMs.Int64 = result.DurationMs
-	auditLog.DurationMs.Valid = true
-	s.db.CreateAuditLog(auditLog)
 
 	// Return result
 	content := []Content{
@@ -295,12 +301,101 @@ func (s *StdioServer) handleExecute(ctx context.Context, id json.RawMessage, too
 		},
 	}
 
-	return NewResponse(id, &CallToolResult{
+	resp := NewResponse(id, &CallToolResult{
 		Content: content,
 		IsError: result.ExitCode != 0,
 		Metadata: &ResultMetadata{
 			ExitCode: result.ExitCode,
 			Stderr:   result.Stderr,
+		},
+		Meta: BuildResultMeta(tool, result.Stdout),
+	})
+	s.logAudit(method, tool.Name, rawParams, resp, nil, startTime)
+	return resp, nil
+}
+
+// logAudit logs an audit entry if database is configured
+func (s *StdioServer) logAudit(method string, toolName string, params interface{}, resp *Response, err error, startTime time.Time) {
+	if s.db == nil {
+		return
+	}
+	if logErr := s.db.LogAudit(db.AuditModeStdio, method, toolName, params, resp, err, startTime); logErr != nil {
+		fmt.Fprintf(os.Stderr, "[WARN] Failed to log audit: %v\n", logErr)
+	}
+}
+
+func (s *StdioServer) handleResourcesList(req *Request) (*Response, error) {
+	// List UI resources for tools that have UI enabled
+	pluginTools := s.plugins.ListTools()
+
+	var resources []Resource
+	for _, t := range pluginTools {
+		if t.UIType != "" || t.UITemplate != "" {
+			resources = append(resources, Resource{
+				URI:         UIResourceURI(t.Name),
+				Name:        fmt.Sprintf("%s UI", t.Name),
+				Description: fmt.Sprintf("Interactive UI for %s tool", t.Name),
+				MimeType:    "text/html",
+			})
+		}
+	}
+
+	return NewResponse(req.ID, &ListResourcesResult{Resources: resources}), nil
+}
+
+func (s *StdioServer) handleResourcesRead(req *Request) (*Response, error) {
+	var params ReadResourceParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, InvalidParams, "Invalid params", err.Error()), nil
+	}
+
+	// Parse ui:// URI
+	if !strings.HasPrefix(params.URI, "ui://") {
+		return NewErrorResponse(req.ID, InvalidParams, "Invalid resource URI", "Only ui:// URIs are supported"), nil
+	}
+
+	// Extract tool name and query string
+	uriPath := strings.TrimPrefix(params.URI, "ui://")
+	parts := strings.SplitN(uriPath, "?", 2)
+	pathParts := strings.Split(parts[0], "/")
+	if len(pathParts) < 1 {
+		return NewErrorResponse(req.ID, InvalidParams, "Invalid resource URI", "Missing tool name"), nil
+	}
+	toolName := pathParts[0]
+
+	// Get the tool from plugins
+	tool := s.plugins.GetTool(toolName)
+	if tool == nil {
+		return NewErrorResponse(req.ID, MethodNotFound, "Tool not found", toolName), nil
+	}
+
+	// Check if tool has UI enabled
+	if tool.UIType == "" && tool.UITemplate == "" {
+		return NewErrorResponse(req.ID, InvalidParams, "Tool has no UI", toolName), nil
+	}
+
+	// Extract data from query string
+	var encodedData string
+	if len(parts) > 1 {
+		queryParts := strings.SplitN(parts[1], "=", 2)
+		if len(queryParts) == 2 && queryParts[0] == "data" {
+			encodedData = queryParts[1]
+		}
+	}
+
+	// Generate HTML
+	htmlContent, err := GenerateUIHTML(tool, encodedData)
+	if err != nil {
+		return NewErrorResponse(req.ID, InternalError, "Failed to generate UI", err.Error()), nil
+	}
+
+	return NewResponse(req.ID, &ReadResourceResult{
+		Contents: []ResourceContent{
+			{
+				URI:      params.URI,
+				MimeType: "text/html",
+				Text:     htmlContent,
+			},
 		},
 	}), nil
 }

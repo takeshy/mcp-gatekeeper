@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/takeshy/mcp-gatekeeper/internal/db"
+	"github.com/takeshy/mcp-gatekeeper/internal/plugin"
 )
 
 // Decision represents the result of policy evaluation
@@ -27,7 +27,7 @@ func NewEvaluator() *Evaluator {
 }
 
 // EvaluateArgs evaluates if the given arguments are allowed for a tool
-func (e *Evaluator) EvaluateArgs(tool *db.Tool, args []string) (*Decision, error) {
+func (e *Evaluator) EvaluateArgs(tool *plugin.Tool, args []string) (*Decision, error) {
 	decision := &Decision{
 		MatchedRules: make([]string, 0),
 	}
@@ -82,7 +82,7 @@ func (e *Evaluator) FilterEnvKeys(allowedEnvKeys []string, envKeys []string) []s
 }
 
 // ValidateTool validates a tool configuration
-func ValidateTool(tool *db.Tool) error {
+func ValidateTool(tool *plugin.Tool) error {
 	matcher := NewMatcher()
 
 	// Validate glob patterns
@@ -94,14 +94,14 @@ func ValidateTool(tool *db.Tool) error {
 
 	// Validate sandbox type
 	switch tool.Sandbox {
-	case db.SandboxTypeNone, db.SandboxTypeBubblewrap, db.SandboxTypeWasm:
+	case plugin.SandboxTypeNone, plugin.SandboxTypeBubblewrap, plugin.SandboxTypeWasm:
 		// Valid
 	default:
 		return fmt.Errorf("invalid sandbox type %q", tool.Sandbox)
 	}
 
 	// Validate wasm binary path for wasm sandbox
-	if tool.Sandbox == db.SandboxTypeWasm && tool.WasmBinary == "" {
+	if tool.Sandbox == plugin.SandboxTypeWasm && tool.WasmBinary == "" {
 		return fmt.Errorf("wasm_binary is required for wasm sandbox")
 	}
 

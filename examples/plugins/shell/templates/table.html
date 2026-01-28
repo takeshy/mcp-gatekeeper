@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Custom Table View</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  padding: 20px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  min-height: 100vh;
+}
+.container {
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+  overflow: hidden;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+.header {
+  background: #f8f9fa;
+  padding: 16px 24px;
+  border-bottom: 1px solid #e0e0e0;
+}
+.header h1 {
+  font-size: 18px;
+  color: #333;
+}
+.header .count {
+  font-size: 14px;
+  color: #666;
+  margin-top: 4px;
+}
+.toolbar {
+  padding: 12px 24px;
+  background: #fafafa;
+  border-bottom: 1px solid #e0e0e0;
+}
+.toolbar input {
+  padding: 8px 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  width: 300px;
+  font-size: 14px;
+}
+.toolbar input:focus {
+  outline: none;
+  border-color: #667eea;
+  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+th, td {
+  border-bottom: 1px solid #e0e0e0;
+  padding: 14px 24px;
+  text-align: left;
+}
+th {
+  background: #f8f9fa;
+  font-weight: 600;
+  color: #333;
+  position: sticky;
+  top: 0;
+}
+tr:hover td {
+  background: #f8f9fa;
+}
+tr:last-child td {
+  border-bottom: none;
+}
+.hidden { display: none; }
+pre {
+  font-family: 'Monaco', 'Menlo', monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>Command Output</h1>
+    <div class="count">{{len .Lines}} lines</div>
+  </div>
+  <div class="toolbar">
+    <input type="text" id="filter" placeholder="Filter lines..." oninput="filterLines()">
+  </div>
+  <table id="data-table">
+    <thead>
+      <tr>
+        <th style="width: 60px">#</th>
+        <th>Content</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range $i, $line := .Lines}}
+      <tr class="line">
+        <td>{{$i}}</td>
+        <td><pre>{{escape $line}}</pre></td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+<script>
+function filterLines() {
+  const filter = document.getElementById('filter').value.toLowerCase();
+  document.querySelectorAll('.line').forEach(row => {
+    const text = row.textContent.toLowerCase();
+    row.classList.toggle('hidden', filter && !text.includes(filter));
+  });
+}
+</script>
+</body>
+</html>

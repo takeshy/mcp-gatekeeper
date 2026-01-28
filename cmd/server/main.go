@@ -14,7 +14,9 @@ import (
 
 	"github.com/takeshy/mcp-gatekeeper/internal/bridge"
 	"github.com/takeshy/mcp-gatekeeper/internal/db"
+	"github.com/takeshy/mcp-gatekeeper/internal/executor"
 	"github.com/takeshy/mcp-gatekeeper/internal/mcp"
+	"github.com/takeshy/mcp-gatekeeper/internal/plugin"
 	"github.com/takeshy/mcp-gatekeeper/internal/version"
 )
 
@@ -22,16 +24,18 @@ func main() {
 	var (
 		showVersion     = flag.Bool("version", false, "Show version and exit")
 		mode            = flag.String("mode", "stdio", "Server mode: stdio, http, or bridge")
-		dbPath          = flag.String("db", "gatekeeper.db", "SQLite database path")
 		addr            = flag.String("addr", ":8080", "HTTP server address (for http/bridge mode)")
-		apiKey          = flag.String("api-key", "", "Fixed API key for all modes (or MCP_GATEKEEPER_API_KEY env var)")
-		rateLimit       = flag.Int("rate-limit", 500, "Rate limit per API key per minute (for http/bridge mode)")
+		apiKey          = flag.String("api-key", "", "API key for authentication (or MCP_GATEKEEPER_API_KEY env var)")
+		rateLimit       = flag.Int("rate-limit", 500, "Rate limit per minute (for http/bridge mode)")
 		rootDir         = flag.String("root-dir", "", "Root directory for command execution (required for stdio/http, acts as chroot)")
 		wasmDir         = flag.String("wasm-dir", "", "Directory containing WASM binaries (mounted as /.wasm in WASM sandbox)")
+		pluginsDir      = flag.String("plugins-dir", "", "Directory containing plugin JSON files (required for stdio/http)")
+		pluginFile      = flag.String("plugin-file", "", "Single plugin JSON file (alternative to plugins-dir)")
 		upstream        = flag.String("upstream", "", "Upstream stdio MCP server command (for bridge mode, e.g., 'node /path/to/server.js')")
 		upstreamEnv     = flag.String("upstream-env", "", "Comma-separated environment variables for upstream server (e.g., 'KEY1=val1,KEY2=val2')")
 		maxResponseSize = flag.Int("max-response-size", 500000, "Max response size in bytes for bridge mode (default 500000)")
 		debug           = flag.Bool("debug", false, "Enable debug logging (logs request/response for bridge mode)")
+		dbPath          = flag.String("db", "", "SQLite database path for audit logging (optional)")
 	)
 	flag.Parse()
 
@@ -40,38 +44,93 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Validate required root-dir (not required for bridge mode)
-	var rootDirAbs string
-	if *mode != "bridge" {
-		if *rootDir == "" {
-			fmt.Fprintf(os.Stderr, "Error: --root-dir is required\n")
-			fmt.Fprintf(os.Stderr, "Usage: %s --root-dir=/path/to/allowed/directory [options]\n", os.Args[0])
-			os.Exit(1)
+	// Auto-detect mode based on flags
+	// --upstream implies bridge mode, --addr implies http mode
+	if *mode == "stdio" {
+		if *upstream != "" {
+			*mode = "bridge"
+		} else {
+			// Check if --addr was explicitly set
+			addrSet := false
+			flag.Visit(func(f *flag.Flag) {
+				if f.Name == "addr" {
+					addrSet = true
+				}
+			})
+			if addrSet {
+				*mode = "http"
+			}
 		}
+	}
 
-		// Validate root-dir exists and is a directory
+	// Get API key from env if not provided
+	if *apiKey == "" {
+		*apiKey = os.Getenv("MCP_GATEKEEPER_API_KEY")
+	}
+
+	// Open database if specified (optional for audit logging)
+	var database *db.DB
+	if *dbPath != "" {
 		var err error
-		rootDirAbs, err = filepath.Abs(*rootDir)
+		database, err = db.Open(*dbPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: invalid root-dir path: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
+			os.Exit(1)
+		}
+		defer database.Close()
+		fmt.Printf("Audit logging enabled (db: %s)\n", *dbPath)
+	}
+
+	// Bridge mode - no plugins needed, just proxy to upstream
+	if *mode == "bridge" {
+		if *upstream == "" {
+			fmt.Fprintf(os.Stderr, "Error: --upstream is required for bridge mode\n")
+			fmt.Fprintf(os.Stderr, "Usage: %s --mode=bridge --upstream='node /path/to/mcp-server.js' [options]\n", os.Args[0])
 			os.Exit(1)
 		}
 
-		info, err := os.Stat(rootDirAbs)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: root-dir does not exist: %v\n", err)
+		// Parse upstream environment variables
+		var upstreamEnvVars []string
+		if *upstreamEnv != "" {
+			upstreamEnvVars = strings.Split(*upstreamEnv, ",")
+		}
+
+		if err := runBridge(*addr, *upstream, upstreamEnvVars, *apiKey, *rateLimit, *maxResponseSize, *debug, database); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-		if !info.IsDir() {
-			fmt.Fprintf(os.Stderr, "Error: root-dir is not a directory: %s\n", rootDirAbs)
-			os.Exit(1)
-		}
+		return
+	}
+
+	// Validate required root-dir for stdio/http modes
+	var rootDirAbs string
+	if *rootDir == "" {
+		fmt.Fprintf(os.Stderr, "Error: --root-dir is required\n")
+		fmt.Fprintf(os.Stderr, "Usage: %s --root-dir=/path/to/allowed/directory [options]\n", os.Args[0])
+		os.Exit(1)
+	}
+
+	// Validate root-dir exists and is a directory
+	var err error
+	rootDirAbs, err = filepath.Abs(*rootDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid root-dir path: %v\n", err)
+		os.Exit(1)
+	}
+
+	info, err := os.Stat(rootDirAbs)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: root-dir does not exist: %v\n", err)
+		os.Exit(1)
+	}
+	if !info.IsDir() {
+		fmt.Fprintf(os.Stderr, "Error: root-dir is not a directory: %s\n", rootDirAbs)
+		os.Exit(1)
 	}
 
 	// Validate wasm-dir if provided
 	var wasmDirAbs string
 	if *wasmDir != "" {
-		var err error
 		wasmDirAbs, err = filepath.Abs(*wasmDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: invalid wasm-dir path: %v\n", err)
@@ -88,87 +147,90 @@ func main() {
 		}
 	}
 
-	// Get API key from env if not provided
-	if *apiKey == "" {
-		*apiKey = os.Getenv("MCP_GATEKEEPER_API_KEY")
-	}
-
-	// Bridge mode - database is optional for audit logging
-	if *mode == "bridge" {
-		if *upstream == "" {
-			fmt.Fprintf(os.Stderr, "Error: --upstream is required for bridge mode\n")
-			fmt.Fprintf(os.Stderr, "Usage: %s --mode=bridge --upstream='node /path/to/mcp-server.js' [options]\n", os.Args[0])
+	// Load plugins
+	var plugins *plugin.Config
+	if *pluginFile != "" {
+		plugins, err = plugin.LoadFromFile(*pluginFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to load plugin file: %v\n", err)
 			os.Exit(1)
 		}
-
-		// Parse upstream environment variables
-		var upstreamEnvVars []string
-		if *upstreamEnv != "" {
-			upstreamEnvVars = strings.Split(*upstreamEnv, ",")
-		}
-
-		// Open database for audit logging only if explicitly requested
-		// Check if --db flag was explicitly set (not the default value for bridge mode)
-		var database *db.DB
-		dbExplicitlySet := false
-		flag.Visit(func(f *flag.Flag) {
-			if f.Name == "db" {
-				dbExplicitlySet = true
-			}
-		})
-		if dbExplicitlySet && *dbPath != "" {
-			var err error
-			database, err = db.Open(*dbPath)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to open database for audit logging: %v\n", err)
-			} else {
-				defer database.Close()
-				fmt.Printf("Audit logging enabled (db: %s)\n", *dbPath)
-			}
-		}
-
-		if err := runBridge(*addr, *upstream, upstreamEnvVars, *apiKey, *rateLimit, *maxResponseSize, *debug, database); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	} else if *pluginsDir != "" {
+		plugins, err = plugin.LoadFromDir(*pluginsDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to load plugins: %v\n", err)
 			os.Exit(1)
 		}
-		return
-	}
-
-	// Open database
-	database, err := db.Open(*dbPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to open database: %v\n", err)
+	} else {
+		fmt.Fprintf(os.Stderr, "Error: --plugins-dir or --plugin-file is required for stdio/http mode\n")
+		fmt.Fprintf(os.Stderr, "Usage: %s --root-dir=/path --plugins-dir=/path/to/plugins [options]\n", os.Args[0])
 		os.Exit(1)
 	}
-	defer database.Close()
 
-	// Print registered API keys and tools
-	printRegisteredTools(database)
+	// Print loaded tools
+	printLoadedTools(plugins)
+
+	// Check if any tool uses bubblewrap and prepare mount directories
+	var sandboxExecutor *executor.Executor
+	hasBubblewrap := false
+	for _, tool := range plugins.ListTools() {
+		if tool.Sandbox == plugin.SandboxTypeBubblewrap {
+			hasBubblewrap = true
+			break
+		}
+	}
+
+	if hasBubblewrap {
+		sandboxExecutor = executor.NewExecutor(&executor.ExecutorConfig{
+			RootDir: rootDirAbs,
+			WasmDir: wasmDirAbs,
+		})
+		if err := sandboxExecutor.PrepareSandbox(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to prepare sandbox directories: %v\n", err)
+		} else {
+			createdDirs := sandboxExecutor.GetSandboxCreatedDirs()
+			if len(createdDirs) > 0 {
+				fmt.Printf("Created bubblewrap mount directories: %v\n", createdDirs)
+			}
+		}
+	}
 
 	// Run in appropriate mode
 	switch *mode {
 	case "stdio":
-		if err := runStdio(database, *apiKey, rootDirAbs, wasmDirAbs); err != nil {
+		if err := runStdio(plugins, *apiKey, rootDirAbs, wasmDirAbs, database); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			if sandboxExecutor != nil {
+				sandboxExecutor.Cleanup()
+			}
 			os.Exit(1)
 		}
 	case "http":
-		if err := runHTTP(database, *addr, *rateLimit, rootDirAbs, wasmDirAbs, *apiKey); err != nil {
+		if err := runHTTP(plugins, *addr, *rateLimit, rootDirAbs, wasmDirAbs, *apiKey, database); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			if sandboxExecutor != nil {
+				sandboxExecutor.Cleanup()
+			}
 			os.Exit(1)
 		}
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown mode: %s\n", *mode)
 		os.Exit(1)
 	}
+
+	// Cleanup on normal exit
+	if sandboxExecutor != nil {
+		if err := sandboxExecutor.Cleanup(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: cleanup failed: %v\n", err)
+		}
+	}
 }
 
-func runStdio(database *db.DB, apiKey string, rootDir string, wasmDir string) error {
-	if apiKey == "" {
-		return fmt.Errorf("API key required for stdio mode (use --api-key or MCP_GATEKEEPER_API_KEY env var)")
-	}
+func runStdio(plugins *plugin.Config, apiKey string, rootDir string, wasmDir string, database *db.DB) error {
+	// For stdio mode, we require API key to be set (either flag or env var)
+	expectedAPIKey := apiKey
 
-	server, err := mcp.NewStdioServer(database, apiKey, rootDir, wasmDir)
+	server, err := mcp.NewStdioServer(plugins, apiKey, expectedAPIKey, rootDir, wasmDir, database)
 	if err != nil {
 		return fmt.Errorf("failed to create stdio server: %w", err)
 	}
@@ -187,15 +249,16 @@ func runStdio(database *db.DB, apiKey string, rootDir string, wasmDir string) er
 	return server.Run(ctx)
 }
 
-func runHTTP(database *db.DB, addr string, rateLimit int, rootDir string, wasmDir string, apiKey string) error {
+func runHTTP(plugins *plugin.Config, addr string, rateLimit int, rootDir string, wasmDir string, apiKey string, database *db.DB) error {
 	config := &mcp.HTTPConfig{
 		RateLimit:       rateLimit,
 		RateLimitWindow: time.Minute,
 		RootDir:         rootDir,
 		WasmDir:         wasmDir,
 		APIKey:          apiKey,
+		DB:              database,
 	}
-	server, err := mcp.NewHTTPServer(database, config)
+	server, err := mcp.NewHTTPServer(plugins, config)
 	if err != nil {
 		return fmt.Errorf("failed to create HTTP server: %w", err)
 	}
@@ -223,6 +286,9 @@ func runHTTP(database *db.DB, addr string, rateLimit int, rootDir string, wasmDi
 		fmt.Printf("Starting HTTP server on %s (root-dir: %s, wasm-dir: %s)\n", addr, rootDir, wasmDir)
 	} else {
 		fmt.Printf("Starting HTTP server on %s (root-dir: %s)\n", addr, rootDir)
+	}
+	if apiKey != "" {
+		fmt.Printf("API key authentication enabled\n")
 	}
 	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		return fmt.Errorf("HTTP server error: %w", err)
@@ -302,42 +368,24 @@ func runBridge(addr string, upstream string, upstreamEnv []string, apiKey string
 	return nil
 }
 
-func printRegisteredTools(database *db.DB) {
-	apiKeys, err := database.ListAPIKeys()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to list API keys: %v\n", err)
+func printLoadedTools(plugins *plugin.Config) {
+	tools := plugins.ListTools()
+	fmt.Println("=== Loaded Tools ===")
+	if len(tools) == 0 {
+		fmt.Println("(no tools loaded)")
 		return
 	}
 
-	fmt.Println("=== Registered API Keys and Tools ===")
-	for _, key := range apiKeys {
-		if key.Status != "active" {
-			continue
+	for _, tool := range tools {
+		sandboxInfo := string(tool.Sandbox)
+		if tool.Sandbox == plugin.SandboxTypeWasm && tool.WasmBinary != "" {
+			sandboxInfo = fmt.Sprintf("wasm: %s", tool.WasmBinary)
+		} else if tool.Sandbox == plugin.SandboxTypeBubblewrap {
+			sandboxInfo = fmt.Sprintf("bubblewrap: %s", tool.Command)
+		} else if tool.Sandbox == plugin.SandboxTypeNone {
+			sandboxInfo = fmt.Sprintf("none: %s", tool.Command)
 		}
-		fmt.Printf("\n[%s] (ID: %d)\n", key.Name, key.ID)
-
-		tools, err := database.ListToolsByAPIKeyID(key.ID)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  Warning: failed to list tools: %v\n", err)
-			continue
-		}
-
-		if len(tools) == 0 {
-			fmt.Println("  (no tools configured)")
-			continue
-		}
-
-		for _, tool := range tools {
-			sandboxInfo := string(tool.Sandbox)
-			if tool.Sandbox == db.SandboxTypeWasm && tool.WasmBinary != "" {
-				sandboxInfo = fmt.Sprintf("wasm: %s", tool.WasmBinary)
-			} else if tool.Sandbox == db.SandboxTypeBubblewrap {
-				sandboxInfo = fmt.Sprintf("bubblewrap: %s", tool.Command)
-			} else if tool.Sandbox == db.SandboxTypeNone {
-				sandboxInfo = fmt.Sprintf("none: %s", tool.Command)
-			}
-			fmt.Printf("  - %s: %s [%s]\n", tool.Name, tool.Description, sandboxInfo)
-		}
+		fmt.Printf("  - %s: %s [%s]\n", tool.Name, tool.Description, sandboxInfo)
 	}
 	fmt.Println()
 }

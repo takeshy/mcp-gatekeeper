@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Git Log</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  padding: 20px;
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+  min-height: 100vh;
+  color: #e0e0e0;
+}
+.container {
+  background: #1e1e2e;
+  border-radius: 12px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.4);
+  overflow: hidden;
+  max-width: 1000px;
+  margin: 0 auto;
+}
+.header {
+  background: linear-gradient(90deg, #f97316, #ea580c);
+  padding: 16px 24px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.header h1 {
+  font-size: 18px;
+  color: white;
+  font-weight: 600;
+}
+.header .icon {
+  font-size: 24px;
+}
+.header .count {
+  margin-left: auto;
+  background: rgba(255,255,255,0.2);
+  padding: 4px 12px;
+  border-radius: 16px;
+  font-size: 14px;
+  color: white;
+}
+.toolbar {
+  padding: 12px 24px;
+  background: #252536;
+  border-bottom: 1px solid #3a3a4a;
+}
+.toolbar input {
+  padding: 10px 14px;
+  border: 1px solid #3a3a4a;
+  border-radius: 8px;
+  width: 100%;
+  max-width: 400px;
+  font-size: 14px;
+  background: #1e1e2e;
+  color: #e0e0e0;
+}
+.toolbar input:focus {
+  outline: none;
+  border-color: #f97316;
+  box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.2);
+}
+.toolbar input::placeholder {
+  color: #666;
+}
+.commits {
+  padding: 8px 0;
+  max-height: 600px;
+  overflow-y: auto;
+}
+.commit {
+  display: flex;
+  padding: 12px 24px;
+  border-bottom: 1px solid #2a2a3a;
+  transition: background 0.2s;
+  gap: 16px;
+  align-items: flex-start;
+}
+.commit:hover {
+  background: #252536;
+}
+.commit:last-child {
+  border-bottom: none;
+}
+.hash {
+  font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+  font-size: 13px;
+  color: #f97316;
+  background: rgba(249, 115, 22, 0.1);
+  padding: 4px 8px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  min-width: 80px;
+  text-align: center;
+}
+.message {
+  flex: 1;
+  font-size: 14px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.hidden { display: none; }
+.empty {
+  text-align: center;
+  padding: 40px;
+  color: #666;
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <span class="icon">&#128203;</span>
+    <h1>Git Commit Log</h1>
+    <span class="count">{{len .Lines}} commits</span>
+  </div>
+  <div class="toolbar">
+    <input type="text" id="filter" placeholder="Search commits..." oninput="filterCommits()">
+  </div>
+  <div class="commits" id="commits">
+    {{range .Lines}}
+    {{if trimSpace .}}
+    {{$parts := split . " "}}
+    <div class="commit">
+      <span class="hash">{{first $parts}}</span>
+      <span class="message">{{escape (join (slice $parts 1) " ")}}</span>
+    </div>
+    {{end}}
+    {{end}}
+  </div>
+</div>
+<script>
+function filterCommits() {
+  const filter = document.getElementById('filter').value.toLowerCase();
+  document.querySelectorAll('.commit').forEach(row => {
+    const text = row.textContent.toLowerCase();
+    row.classList.toggle('hidden', filter && !text.includes(filter));
+  });
+}
+</script>
+</body>
+</html>
