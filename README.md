@@ -1,6 +1,19 @@
 # MCP Gatekeeper
 
-An MCP (Model Context Protocol) server that provides secure shell command execution and HTTP proxy capabilities for AI assistants.
+[![Go](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![MCP](https://img.shields.io/badge/MCP-2025--11-green)](https://modelcontextprotocol.io/)
+
+A security-focused MCP (Model Context Protocol) gateway that enables AI assistants to safely execute shell commands with fine-grained access control.
+
+**Why MCP Gatekeeper?**
+
+- **Security First**: Multi-layer protection with policy-based argument validation, environment variable filtering, and sandboxing (bubblewrap/WASM)
+- **Flexible Deployment**: Run as stdio server for Claude Desktop, HTTP API for web services, or bridge proxy for existing MCP servers
+- **Bridge Mode**: Expose any stdio-based MCP server (Playwright, filesystem, etc.) over HTTP with authentication, rate limiting, and large response handling
+- **OAuth 2.0 Ready**: Machine-to-machine authentication with client credentials flow ([MCP SEP-1046](https://github.com/modelcontextprotocol/ext-auth))
+- **Plugin Architecture**: Define tools via simple JSON files with glob-based argument patterns
+- **Rich UI Support**: Generate interactive HTML interfaces via MCP Apps for command outputs
 
 ## Architecture
 
@@ -17,7 +30,9 @@ An MCP (Model Context Protocol) server that provides secure shell command execut
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                                     ↓                                       │
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  API Key Authentication & Rate Limiting                             │   │
+│  │  Authentication & Rate Limiting                                     │   │
+│  │  ├─ API Key: Simple Bearer token authentication                     │   │
+│  │  └─ OAuth 2.0: Client credentials flow (M2M)                        │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                                     ↓                                       │
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
@@ -76,6 +91,8 @@ An MCP (Model Context Protocol) server that provides secure shell command execut
 - **JSON Plugin Configuration**: Define tools via simple JSON files
 - **Flexible Sandboxing**: none, bubblewrap, or WASM isolation
 - **Policy-Based Access Control**: Glob patterns for argument validation
+- **OAuth 2.0 Authentication**: Client credentials flow for M2M communication
+- **TUI Admin Tool**: Manage OAuth clients via terminal UI
 - **Optional Audit Logging**: SQLite-based logging for all modes
 - **Large Response Handling**: Automatic file externalization in bridge mode
 - **MCP Apps UI Support**: Rich HTML interfaces for tool outputs
@@ -276,7 +293,9 @@ Tool names must be unique across all plugins.
 | `--plugin-file` | - | Single plugin JSON file |
 | `--plugins-dir` | - | Directory containing plugin directories/files |
 | `--api-key` | - | API key for authentication (or `MCP_GATEKEEPER_API_KEY` env) |
-| `--db` | - | SQLite database path for audit logging (optional) |
+| `--db` | - | SQLite database path for audit logging and OAuth (optional) |
+| `--enable-oauth` | `false` | Enable OAuth 2.0 authentication (requires `--db`) |
+| `--oauth-issuer` | - | OAuth issuer URL (optional, auto-detected if empty) |
 | `--addr` | `:8080` | HTTP listen address (http/bridge) |
 | `--rate-limit` | `500` | Max requests per minute (http/bridge) |
 | `--upstream` | - | Upstream MCP server command (required for bridge) |
@@ -310,6 +329,126 @@ Query logs:
 ```bash
 sqlite3 audit.db "SELECT mode, method, tool_name, duration_ms FROM audit_logs ORDER BY id DESC LIMIT 10"
 ```
+
+## OAuth 2.0 Authentication
+
+MCP Gatekeeper supports OAuth 2.0 client credentials flow for machine-to-machine (M2M) authentication. This is useful when you need more secure authentication than simple API keys.
+
+### Enable OAuth
+
+```bash
+./mcp-gatekeeper --mode=http \
+  --db=gatekeeper.db \
+  --enable-oauth \
+  --addr=:8080 \
+  --plugins-dir=plugins/ \
+  --root-dir=/path/to/root
+```
+
+**Note**: OAuth requires `--db` to store client credentials and tokens.
+
+### Create OAuth Clients
+
+Use the TUI admin tool to create OAuth clients:
+
+```bash
+./mcp-gatekeeper-admin --db=gatekeeper.db
+```
+
+Navigate to "OAuth Clients" → "New Client" → Enter client ID → Save the generated client secret.
+
+### OAuth Flow (Client Credentials)
+
+```bash
+# 1. Get access token
+curl -X POST http://localhost:8080/oauth/token \
+  -d "grant_type=client_credentials&client_id=myclient&client_secret=SECRET"
+
+# Response:
+# {
+#   "access_token": "...",
+#   "token_type": "Bearer",
+#   "expires_in": 3600,
+#   "refresh_token": "..."
+# }
+
+# 2. Call MCP endpoint
+curl -X POST http://localhost:8080/mcp \
+  -H "Authorization: Bearer ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+
+# 3. Refresh token (when access token expires)
+curl -X POST http://localhost:8080/oauth/token \
+  -d "grant_type=refresh_token&refresh_token=REFRESH_TOKEN&client_id=myclient&client_secret=SECRET"
+```
+
+You can also use HTTP Basic auth for client credentials:
+
+```bash
+curl -X POST http://localhost:8080/oauth/token \
+  -H "Authorization: Basic BASE64(client_id:client_secret)" \
+  -d "grant_type=client_credentials"
+```
+
+### OAuth Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /oauth/token` | Token endpoint (client_credentials, refresh_token) |
+| `GET /.well-known/oauth-authorization-server` | OAuth server metadata |
+| `GET /.well-known/openid-configuration` | OpenID Connect discovery |
+| `GET /.well-known/oauth-protected-resource` | Protected resource metadata (RFC 9728) |
+| `GET /.well-known/oauth-protected-resource/{resourcePath}` | Protected resource metadata for a specific path |
+
+### Token Expiration
+
+| Token | Lifetime |
+|-------|----------|
+| Access Token | 1 hour |
+| Refresh Token | Unlimited (until client revoked) |
+
+### Dual Authentication
+
+When both `--api-key` and `--enable-oauth` are set, either authentication method is accepted:
+- Bearer token matching API key
+- Bearer token from OAuth access token
+
+## TUI Admin Tool
+
+The `mcp-gatekeeper-admin` tool provides a terminal UI for managing OAuth clients.
+
+### Installation
+
+```bash
+# Build from source
+make build-admin
+
+# Or install directly
+go install github.com/takeshy/mcp-gatekeeper/cmd/admin@latest
+```
+
+### Usage
+
+```bash
+./mcp-gatekeeper-admin --db=gatekeeper.db
+```
+
+### Features
+
+- **OAuth Clients**: List, create, revoke, and delete OAuth clients
+- **Audit Logs**: View audit log statistics
+
+### Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `j/k` or `↑/↓` | Navigate |
+| `Enter` | Select |
+| `r` | Revoke client |
+| `d` | Delete client |
+| `Esc` | Go back |
+| `q` | Quit |
 
 ## Bridge Mode Features
 

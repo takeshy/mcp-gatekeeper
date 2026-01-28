@@ -1,0 +1,42 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/takeshy/mcp-gatekeeper/internal/db"
+	"github.com/takeshy/mcp-gatekeeper/internal/tui"
+	"github.com/takeshy/mcp-gatekeeper/internal/version"
+)
+
+func main() {
+	var (
+		showVersion = flag.Bool("version", false, "Show version and exit")
+		dbPath      = flag.String("db", "gatekeeper.db", "SQLite database path")
+	)
+	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("mcp-gatekeeper-admin %s\n", version.Version)
+		os.Exit(0)
+	}
+
+	// Open database
+	database, err := db.Open(*dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
+		os.Exit(1)
+	}
+	defer database.Close()
+
+	// Create and run TUI app
+	app := tui.NewApp(database)
+	p := tea.NewProgram(app, tea.WithAltScreen())
+
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}

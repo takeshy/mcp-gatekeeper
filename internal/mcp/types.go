@@ -56,15 +56,16 @@ type Notification struct {
 
 // InitializeParams represents the params for initialize request
 type InitializeParams struct {
-	ProtocolVersion string           `json:"protocolVersion"`
+	ProtocolVersion string             `json:"protocolVersion"`
 	Capabilities    ClientCapabilities `json:"capabilities"`
-	ClientInfo      ClientInfo       `json:"clientInfo"`
+	ClientInfo      ClientInfo         `json:"clientInfo"`
 }
 
 // ClientCapabilities represents client capabilities
 type ClientCapabilities struct {
-	Roots    *RootsCapability    `json:"roots,omitempty"`
-	Sampling *SamplingCapability `json:"sampling,omitempty"`
+	Roots      *RootsCapability                  `json:"roots,omitempty"`
+	Sampling   *SamplingCapability               `json:"sampling,omitempty"`
+	Extensions map[string]map[string]interface{} `json:"extensions,omitempty"`
 }
 
 // RootsCapability represents roots capability
@@ -90,8 +91,9 @@ type InitializeResult struct {
 
 // ServerCapabilities represents server capabilities
 type ServerCapabilities struct {
-	Tools     *ToolsCapability     `json:"tools,omitempty"`
-	Resources *ResourcesCapability `json:"resources,omitempty"`
+	Tools      *ToolsCapability                  `json:"tools,omitempty"`
+	Resources  *ResourcesCapability              `json:"resources,omitempty"`
+	Extensions map[string]map[string]interface{} `json:"extensions,omitempty"`
 }
 
 // ToolsCapability represents tools capability

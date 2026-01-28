@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/takeshy/mcp-gatekeeper/internal/db"
+	"github.com/takeshy/mcp-gatekeeper/internal/oauth"
 	"github.com/takeshy/mcp-gatekeeper/internal/version"
 )
 
@@ -26,7 +27,8 @@ type Server struct {
 	maxResponseSize int
 	fileStore       *FileStore
 	debug           bool
-	db              *db.DB // Optional database for audit logging
+	db              *db.DB         // Optional database for audit logging
+	oauthHandler    *oauth.Handler // Optional OAuth handler
 	mu              sync.RWMutex
 }
 
@@ -46,6 +48,8 @@ type ServerConfig struct {
 	MaxResponseSize int    // Max response size in bytes (default 500000)
 	Debug           bool   // Enable debug logging
 	DB              *db.DB // Optional database for audit logging
+	EnableOAuth     bool   // Enable OAuth authentication (requires DB)
+	OAuthIssuer     string // OAuth issuer URL (optional, auto-detected if empty)
 }
 
 // RateLimiter implements a sliding window rate limiter using a ring buffer
@@ -148,6 +152,11 @@ func NewServer(config *ServerConfig) (*Server, error) {
 		db:              config.DB,
 	}
 
+	// Initialize OAuth handler if enabled and DB is available
+	if config.EnableOAuth && config.DB != nil {
+		s.oauthHandler = oauth.NewHandler(config.DB, config.OAuthIssuer)
+	}
+
 	s.setupRoutes()
 	return s, nil
 }
@@ -163,9 +172,14 @@ func (s *Server) setupRoutes() {
 	// Health check
 	r.Get("/health", s.handleHealth)
 
+	// OAuth endpoints (if enabled)
+	if s.oauthHandler != nil {
+		r.Mount("/", s.oauthHandler.Router())
+	}
+
 	// File retrieval endpoint
 	r.Group(func(r chi.Router) {
-		if s.apiKey != "" {
+		if s.apiKey != "" || s.oauthHandler != nil {
 			r.Use(s.authMiddleware)
 		}
 		r.Get("/files/{key}", s.handleFileGet)
@@ -173,7 +187,7 @@ func (s *Server) setupRoutes() {
 
 	// MCP JSON-RPC endpoint
 	r.Group(func(r chi.Router) {
-		if s.apiKey != "" {
+		if s.apiKey != "" || s.oauthHandler != nil {
 			r.Use(s.authMiddleware)
 		}
 		r.Use(s.rateLimitMiddleware)
@@ -215,23 +229,46 @@ func (s *Server) Close() error {
 	return s.client.Close()
 }
 
-// authMiddleware handles API key authentication
+// authMiddleware handles API key and OAuth token authentication
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
+			s.maybeSetWWWAuthenticate(w, r)
 			s.writeError(w, http.StatusUnauthorized, "missing authorization header")
 			return
 		}
 
 		parts := strings.SplitN(authHeader, " ", 2)
 		if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
+			s.maybeSetWWWAuthenticate(w, r)
 			s.writeError(w, http.StatusUnauthorized, "invalid authorization header format")
 			return
 		}
+		token := parts[1]
 
-		if subtle.ConstantTimeCompare([]byte(parts[1]), []byte(s.apiKey)) != 1 {
-			s.writeError(w, http.StatusUnauthorized, "invalid API key")
+		// Try API key authentication first (if configured)
+		authenticated := false
+		if s.apiKey != "" {
+			if subtle.ConstantTimeCompare([]byte(token), []byte(s.apiKey)) == 1 {
+				authenticated = true
+			}
+		}
+
+		// Try OAuth token authentication (if enabled and API key didn't match)
+		if !authenticated && s.oauthHandler != nil {
+			client, err := s.oauthHandler.ValidateAccessToken(r)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[WARN] OAuth token validation error: %v\n", err)
+			}
+			if client != nil {
+				authenticated = true
+			}
+		}
+
+		if !authenticated {
+			s.maybeSetWWWAuthenticate(w, r)
+			s.writeError(w, http.StatusUnauthorized, "invalid credentials")
 			return
 		}
 
@@ -456,13 +493,20 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 // handleInitializeWithAudit handles initialize requests locally with audit logging
 func (s *Server) handleInitializeWithAudit(w http.ResponseWriter, req *Request, params string, startTime time.Time) {
 	// Return bridge server info, forwarding upstream capabilities
+	capabilities := map[string]interface{}{
+		"tools": map[string]interface{}{
+			"listChanged": false,
+		},
+	}
+	if s.oauthHandler != nil {
+		capabilities["extensions"] = map[string]interface{}{
+			"io.modelcontextprotocol/oauth-client-credentials": map[string]interface{}{},
+		}
+	}
+
 	result := map[string]interface{}{
 		"protocolVersion": version.MCPProtocolVersion,
-		"capabilities": map[string]interface{}{
-			"tools": map[string]interface{}{
-				"listChanged": false,
-			},
-		},
+		"capabilities":    capabilities,
 		"serverInfo": map[string]interface{}{
 			"name":    "mcp-gatekeeper-bridge",
 			"version": version.Version,
@@ -477,6 +521,30 @@ func (s *Server) handleInitializeWithAudit(w http.ResponseWriter, req *Request, 
 	}
 	s.writeJSONRPC(w, resp)
 	s.logAudit(req.Method, params, resp, nil, startTime)
+}
+
+func (s *Server) maybeSetWWWAuthenticate(w http.ResponseWriter, r *http.Request) {
+	if s.oauthHandler == nil {
+		return
+	}
+
+	baseURL := s.requestBaseURL(r)
+	metadataURL := baseURL + "/.well-known/oauth-protected-resource" + r.URL.Path
+	w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer resource_metadata="%s"`, metadataURL))
+}
+
+func (s *Server) requestBaseURL(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		scheme = "https"
+	}
+
+	host := r.Host
+	if forwardedHost := r.Header.Get("X-Forwarded-Host"); forwardedHost != "" {
+		host = forwardedHost
+	}
+
+	return fmt.Sprintf("%s://%s", scheme, host)
 }
 
 func (s *Server) writeJSONRPC(w http.ResponseWriter, resp *Response) {

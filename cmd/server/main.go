@@ -36,6 +36,8 @@ func main() {
 		maxResponseSize = flag.Int("max-response-size", 500000, "Max response size in bytes for bridge mode (default 500000)")
 		debug           = flag.Bool("debug", false, "Enable debug logging (logs request/response for bridge mode)")
 		dbPath          = flag.String("db", "", "SQLite database path for audit logging (optional)")
+		enableOAuth     = flag.Bool("enable-oauth", false, "Enable OAuth 2.0 authentication (requires --db)")
+		oauthIssuer     = flag.String("oauth-issuer", "", "OAuth issuer URL (optional, auto-detected if empty)")
 	)
 	flag.Parse()
 
@@ -68,7 +70,13 @@ func main() {
 		*apiKey = os.Getenv("MCP_GATEKEEPER_API_KEY")
 	}
 
-	// Open database if specified (optional for audit logging)
+	// Validate OAuth requires DB
+	if *enableOAuth && *dbPath == "" {
+		fmt.Fprintf(os.Stderr, "Error: --enable-oauth requires --db to be specified\n")
+		os.Exit(1)
+	}
+
+	// Open database if specified (optional for audit logging, required for OAuth)
 	var database *db.DB
 	if *dbPath != "" {
 		var err error
@@ -79,6 +87,9 @@ func main() {
 		}
 		defer database.Close()
 		fmt.Printf("Audit logging enabled (db: %s)\n", *dbPath)
+		if *enableOAuth {
+			fmt.Printf("OAuth 2.0 authentication enabled\n")
+		}
 	}
 
 	// Bridge mode - no plugins needed, just proxy to upstream
@@ -95,7 +106,7 @@ func main() {
 			upstreamEnvVars = strings.Split(*upstreamEnv, ",")
 		}
 
-		if err := runBridge(*addr, *upstream, upstreamEnvVars, *apiKey, *rateLimit, *maxResponseSize, *debug, database); err != nil {
+		if err := runBridge(*addr, *upstream, upstreamEnvVars, *apiKey, *rateLimit, *maxResponseSize, *debug, database, *enableOAuth, *oauthIssuer); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -206,7 +217,7 @@ func main() {
 			os.Exit(1)
 		}
 	case "http":
-		if err := runHTTP(plugins, *addr, *rateLimit, rootDirAbs, wasmDirAbs, *apiKey, database); err != nil {
+		if err := runHTTP(plugins, *addr, *rateLimit, rootDirAbs, wasmDirAbs, *apiKey, database, *enableOAuth, *oauthIssuer); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			if sandboxExecutor != nil {
 				sandboxExecutor.Cleanup()
@@ -249,7 +260,7 @@ func runStdio(plugins *plugin.Config, apiKey string, rootDir string, wasmDir str
 	return server.Run(ctx)
 }
 
-func runHTTP(plugins *plugin.Config, addr string, rateLimit int, rootDir string, wasmDir string, apiKey string, database *db.DB) error {
+func runHTTP(plugins *plugin.Config, addr string, rateLimit int, rootDir string, wasmDir string, apiKey string, database *db.DB, enableOAuth bool, oauthIssuer string) error {
 	config := &mcp.HTTPConfig{
 		RateLimit:       rateLimit,
 		RateLimitWindow: time.Minute,
@@ -257,6 +268,8 @@ func runHTTP(plugins *plugin.Config, addr string, rateLimit int, rootDir string,
 		WasmDir:         wasmDir,
 		APIKey:          apiKey,
 		DB:              database,
+		EnableOAuth:     enableOAuth,
+		OAuthIssuer:     oauthIssuer,
 	}
 	server, err := mcp.NewHTTPServer(plugins, config)
 	if err != nil {
@@ -297,7 +310,7 @@ func runHTTP(plugins *plugin.Config, addr string, rateLimit int, rootDir string,
 	return nil
 }
 
-func runBridge(addr string, upstream string, upstreamEnv []string, apiKey string, rateLimit int, maxResponseSize int, debug bool, database *db.DB) error {
+func runBridge(addr string, upstream string, upstreamEnv []string, apiKey string, rateLimit int, maxResponseSize int, debug bool, database *db.DB, enableOAuth bool, oauthIssuer string) error {
 	// Parse upstream command with shell-like syntax support
 	parts, err := bridge.ParseCommand(upstream)
 	if err != nil {
@@ -318,6 +331,8 @@ func runBridge(addr string, upstream string, upstreamEnv []string, apiKey string
 		MaxResponseSize: maxResponseSize,
 		Debug:           debug,
 		DB:              database,
+		EnableOAuth:     enableOAuth,
+		OAuthIssuer:     oauthIssuer,
 	}
 
 	server, err := bridge.NewServer(config)

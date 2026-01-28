@@ -16,6 +16,7 @@ import (
 
 	"github.com/takeshy/mcp-gatekeeper/internal/db"
 	"github.com/takeshy/mcp-gatekeeper/internal/executor"
+	"github.com/takeshy/mcp-gatekeeper/internal/oauth"
 	"github.com/takeshy/mcp-gatekeeper/internal/plugin"
 	"github.com/takeshy/mcp-gatekeeper/internal/policy"
 )
@@ -70,8 +71,9 @@ type HTTPServer struct {
 	rateLimiter    *RateLimiter
 	router         chi.Router
 	rootDir        string
-	expectedAPIKey string // Expected API key for authentication
-	db             *db.DB // Optional database for audit logging
+	expectedAPIKey string         // Expected API key for authentication
+	db             *db.DB         // Optional database for audit logging
+	oauthHandler   *oauth.Handler // Optional OAuth handler
 }
 
 // HTTPConfig holds HTTP server configuration
@@ -82,6 +84,8 @@ type HTTPConfig struct {
 	WasmDir         string
 	APIKey          string // Expected API key for authentication (optional)
 	DB              *db.DB // Optional database for audit logging
+	EnableOAuth     bool   // Enable OAuth authentication (requires DB)
+	OAuthIssuer     string // OAuth issuer URL (optional, auto-detected if empty)
 }
 
 // DefaultHTTPConfig returns the default HTTP configuration
@@ -115,6 +119,11 @@ func NewHTTPServer(plugins *plugin.Config, config *HTTPConfig) (*HTTPServer, err
 		db:             config.DB,
 	}
 
+	// Initialize OAuth handler if enabled and DB is available
+	if config.EnableOAuth && config.DB != nil {
+		s.oauthHandler = oauth.NewHandler(config.DB, config.OAuthIssuer)
+	}
+
 	s.setupRoutes()
 	return s, nil
 }
@@ -130,6 +139,11 @@ func (s *HTTPServer) setupRoutes() {
 	// Health check
 	r.Get("/health", s.handleHealth)
 
+	// OAuth endpoints (if enabled)
+	if s.oauthHandler != nil {
+		r.Mount("/", s.oauthHandler.Router())
+	}
+
 	// MCP JSON-RPC endpoint (with auth)
 	r.Group(func(r chi.Router) {
 		r.Use(s.authMiddleware)
@@ -144,11 +158,11 @@ func (s *HTTPServer) Handler() http.Handler {
 	return s.router
 }
 
-// authMiddleware handles API key authentication
+// authMiddleware handles API key and OAuth token authentication
 func (s *HTTPServer) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// If no API key is configured, skip authentication
-		if s.expectedAPIKey == "" {
+		// If no API key is configured and OAuth is not enabled, skip authentication
+		if s.expectedAPIKey == "" && s.oauthHandler == nil {
 			// Still check rate limit
 			if !s.rateLimiter.Allow() {
 				s.writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
@@ -161,6 +175,7 @@ func (s *HTTPServer) authMiddleware(next http.Handler) http.Handler {
 		// Get API key from Authorization header
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
+			s.maybeSetWWWAuthenticate(w, r)
 			s.writeError(w, http.StatusUnauthorized, "missing authorization header")
 			return
 		}
@@ -168,14 +183,34 @@ func (s *HTTPServer) authMiddleware(next http.Handler) http.Handler {
 		// Parse Bearer token
 		parts := strings.SplitN(authHeader, " ", 2)
 		if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
+			s.maybeSetWWWAuthenticate(w, r)
 			s.writeError(w, http.StatusUnauthorized, "invalid authorization header format")
 			return
 		}
-		apiKey := parts[1]
+		token := parts[1]
 
-		// Validate API key using constant-time comparison
-		if subtle.ConstantTimeCompare([]byte(apiKey), []byte(s.expectedAPIKey)) != 1 {
-			s.writeError(w, http.StatusUnauthorized, "invalid API key")
+		// Try API key authentication first (if configured)
+		authenticated := false
+		if s.expectedAPIKey != "" {
+			if subtle.ConstantTimeCompare([]byte(token), []byte(s.expectedAPIKey)) == 1 {
+				authenticated = true
+			}
+		}
+
+		// Try OAuth token authentication (if enabled and API key didn't match)
+		if !authenticated && s.oauthHandler != nil {
+			client, err := s.oauthHandler.ValidateAccessToken(r)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[WARN] OAuth token validation error: %v\n", err)
+			}
+			if client != nil {
+				authenticated = true
+			}
+		}
+
+		if !authenticated {
+			s.maybeSetWWWAuthenticate(w, r)
+			s.writeError(w, http.StatusUnauthorized, "invalid credentials")
 			return
 		}
 
@@ -262,6 +297,12 @@ func (s *HTTPServer) handleMCPInitialize(req *Request) *Response {
 		}
 	}
 
+	if s.oauthHandler != nil {
+		caps.Extensions = map[string]map[string]interface{}{
+			"io.modelcontextprotocol/oauth-client-credentials": {},
+		}
+	}
+
 	result := &InitializeResult{
 		ProtocolVersion: ProtocolVersion,
 		Capabilities:    caps,
@@ -271,6 +312,30 @@ func (s *HTTPServer) handleMCPInitialize(req *Request) *Response {
 		},
 	}
 	return NewResponse(req.ID, result)
+}
+
+func (s *HTTPServer) maybeSetWWWAuthenticate(w http.ResponseWriter, r *http.Request) {
+	if s.oauthHandler == nil {
+		return
+	}
+
+	baseURL := s.requestBaseURL(r)
+	metadataURL := baseURL + "/.well-known/oauth-protected-resource" + r.URL.Path
+	w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer resource_metadata="%s"`, metadataURL))
+}
+
+func (s *HTTPServer) requestBaseURL(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		scheme = "https"
+	}
+
+	host := r.Host
+	if forwardedHost := r.Header.Get("X-Forwarded-Host"); forwardedHost != "" {
+		host = forwardedHost
+	}
+
+	return fmt.Sprintf("%s://%s", scheme, host)
 }
 
 func (s *HTTPServer) hasUIEnabledTools() bool {
