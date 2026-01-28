@@ -291,23 +291,32 @@ func (s *HTTPServer) handleMCPToolsList(req *Request) *Response {
 		if !t.IsVisibleToModel() {
 			continue
 		}
+
+		// Build properties based on whether the tool accepts arguments
+		props := map[string]Property{
+			"cwd": {
+				Type:        "string",
+				Description: "Working directory for the command (defaults to root directory)",
+			},
+		}
+		// Only include args property if the tool accepts arguments
+		// A tool with allowed_arg_globs = [""] means it accepts no arguments
+		noArgs := len(t.AllowedArgGlobs) == 1 && t.AllowedArgGlobs[0] == ""
+		if !noArgs {
+			props["args"] = Property{
+				Type:        "array",
+				Description: "Command arguments",
+				Items:       &Items{Type: "string"},
+			}
+		}
+
 		tools = append(tools, Tool{
 			Name:        t.Name,
 			Description: t.Description,
 			InputSchema: InputSchema{
-				Type: "object",
-				Properties: map[string]Property{
-					"cwd": {
-						Type:        "string",
-						Description: "Working directory for the command (defaults to root directory)",
-					},
-					"args": {
-						Type:        "array",
-						Description: "Command arguments",
-						Items:       &Items{Type: "string"},
-					},
-				},
-				Required: []string{},
+				Type:       "object",
+				Properties: props,
+				Required:   []string{},
 			},
 			Meta: BuildToolMeta(t),
 		})
