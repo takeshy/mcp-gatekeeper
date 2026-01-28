@@ -17,7 +17,9 @@ AIアシスタント向けに、安全なシェルコマンド実行とHTTPプ�
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                                     ↓                                       │
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  APIキー認証 & レート制限                                           │   │
+│  │  認証 & レート制限                                                  │   │
+│  │  ├─ APIキー: シンプルなBearerトークン認証                           │   │
+│  │  └─ OAuth 2.0: クライアントクレデンシャルフロー（M2M）              │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                                     ↓                                       │
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
@@ -76,6 +78,8 @@ AIアシスタント向けに、安全なシェルコマンド実行とHTTPプ�
 - **JSONプラグイン設定**: シンプルなJSONファイルでツールを定義
 - **柔軟なサンドボックス**: none, bubblewrap, WASM分離
 - **ポリシーベースのアクセス制御**: Globパターンによる引数検証
+- **OAuth 2.0認証**: M2M通信向けクライアントクレデンシャルフロー
+- **TUI管理ツール**: ターミナルUIでOAuthクライアントを管理
 - **オプションの監査ログ**: 全モード対応のSQLiteログ
 - **大容量レスポンス対応**: bridgeモードでの自動ファイル外部化
 - **MCP Apps UI対応**: ツール出力をリッチHTMLで表示
@@ -261,7 +265,9 @@ plugins/
 | `--plugin-file` | - | 単一のプラグインJSONファイル |
 | `--plugins-dir` | - | プラグインディレクトリ/ファイルを含むディレクトリ |
 | `--api-key` | - | 認証用APIキー（または `MCP_GATEKEEPER_API_KEY` 環境変数） |
-| `--db` | - | 監査ログ用SQLiteデータベースパス（オプション） |
+| `--db` | - | 監査ログ・OAuth用SQLiteデータベースパス（オプション） |
+| `--enable-oauth` | `false` | OAuth 2.0認証を有効化（`--db`必須） |
+| `--oauth-issuer` | - | OAuth発行者URL（省略時は自動検出） |
 | `--addr` | `:8080` | HTTPリッスンアドレス（http/bridge） |
 | `--rate-limit` | `500` | 1分あたりの最大リクエスト数（http/bridge） |
 | `--upstream` | - | 上流MCPサーバーコマンド（bridgeで必須） |
@@ -295,6 +301,126 @@ plugins/
 ```bash
 sqlite3 audit.db "SELECT mode, method, tool_name, duration_ms FROM audit_logs ORDER BY id DESC LIMIT 10"
 ```
+
+## OAuth 2.0認証
+
+MCP GatekeeperはM2M（マシン間）認証向けのOAuth 2.0クライアントクレデンシャルフローをサポートしています。シンプルなAPIキーよりも安全な認証が必要な場合に便利です。
+
+### OAuthの有効化
+
+```bash
+./mcp-gatekeeper --mode=http \
+  --db=gatekeeper.db \
+  --enable-oauth \
+  --addr=:8080 \
+  --plugins-dir=plugins/ \
+  --root-dir=/path/to/root
+```
+
+**注意**: OAuthはクライアントクレデンシャルとトークンを保存するため`--db`が必須です。
+
+### OAuthクライアントの作成
+
+TUI管理ツールを使用してOAuthクライアントを作成します：
+
+```bash
+./mcp-gatekeeper-admin --db=gatekeeper.db
+```
+
+「OAuth Clients」→「New Client」→クライアントIDを入力→生成されたクライアントシークレットを保存。
+
+### OAuthフロー（クライアントクレデンシャル）
+
+```bash
+# 1. アクセストークン取得
+curl -X POST http://localhost:8080/oauth/token \
+  -d "grant_type=client_credentials&client_id=myclient&client_secret=SECRET"
+
+# レスポンス:
+# {
+#   "access_token": "...",
+#   "token_type": "Bearer",
+#   "expires_in": 3600,
+#   "refresh_token": "..."
+# }
+
+# 2. MCPエンドポイント呼び出し
+curl -X POST http://localhost:8080/mcp \
+  -H "Authorization: Bearer ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+
+# 3. トークンリフレッシュ（アクセストークン期限切れ時）
+curl -X POST http://localhost:8080/oauth/token \
+  -d "grant_type=refresh_token&refresh_token=REFRESH_TOKEN&client_id=myclient&client_secret=SECRET"
+```
+
+HTTP Basic 認証でクライアント認証することもできます:
+
+```bash
+curl -X POST http://localhost:8080/oauth/token \
+  -H "Authorization: Basic BASE64(client_id:client_secret)" \
+  -d "grant_type=client_credentials"
+```
+
+### OAuthエンドポイント
+
+| エンドポイント | 説明 |
+|---------------|------|
+| `POST /oauth/token` | トークンエンドポイント（client_credentials, refresh_token） |
+| `GET /.well-known/oauth-authorization-server` | OAuthサーバーメタデータ |
+| `GET /.well-known/openid-configuration` | OpenID Connectディスカバリ |
+| `GET /.well-known/oauth-protected-resource` | 保護リソースメタデータ (RFC 9728) |
+| `GET /.well-known/oauth-protected-resource/{resourcePath}` | パス指定の保護リソースメタデータ |
+
+### トークン有効期限
+
+| トークン | 有効期限 |
+|---------|---------|
+| アクセストークン | 1時間 |
+| リフレッシュトークン | 無期限（クライアント無効化まで） |
+
+### 二重認証
+
+`--api-key`と`--enable-oauth`の両方を設定した場合、どちらの認証方式でも受け付けます：
+- APIキーに一致するBearerトークン
+- OAuthアクセストークンのBearerトークン
+
+## TUI管理ツール
+
+`mcp-gatekeeper-admin`ツールはOAuthクライアントを管理するためのターミナルUIを提供します。
+
+### インストール
+
+```bash
+# ソースからビルド
+make build-admin
+
+# または直接インストール
+go install github.com/takeshy/mcp-gatekeeper/cmd/admin@latest
+```
+
+### 使い方
+
+```bash
+./mcp-gatekeeper-admin --db=gatekeeper.db
+```
+
+### 機能
+
+- **OAuthクライアント**: OAuthクライアントの一覧、作成、無効化、削除
+- **監査ログ**: 監査ログの統計表示
+
+### キーボードショートカット
+
+| キー | アクション |
+|------|-----------|
+| `j/k` または `↑/↓` | ナビゲーション |
+| `Enter` | 選択 |
+| `r` | クライアント無効化 |
+| `d` | クライアント削除 |
+| `Esc` | 戻る |
+| `q` | 終了 |
 
 ## Bridgeモードの機能
 
