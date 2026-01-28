@@ -1,6 +1,19 @@
 # MCP Gatekeeper
 
-An MCP (Model Context Protocol) server that provides secure shell command execution and HTTP proxy capabilities for AI assistants.
+[![Go](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![MCP](https://img.shields.io/badge/MCP-2025--11-green)](https://modelcontextprotocol.io/)
+
+A security-focused MCP (Model Context Protocol) gateway that enables AI assistants to safely execute shell commands with fine-grained access control.
+
+**Why MCP Gatekeeper?**
+
+- **Security First**: Multi-layer protection with policy-based argument validation, environment variable filtering, and sandboxing (bubblewrap/WASM)
+- **Flexible Deployment**: Run as stdio server for Claude Desktop, HTTP API for web services, or bridge proxy for existing MCP servers
+- **Bridge Mode**: Expose any stdio-based MCP server (Playwright, filesystem, etc.) over HTTP with authentication, rate limiting, and large response handling
+- **OAuth 2.0 Ready**: Machine-to-machine authentication with client credentials flow ([MCP SEP-1046](https://github.com/modelcontextprotocol/ext-auth))
+- **Plugin Architecture**: Define tools via simple JSON files with glob-based argument patterns
+- **Rich UI Support**: Generate interactive HTML interfaces via MCP Apps for command outputs
 
 ## Architecture
 

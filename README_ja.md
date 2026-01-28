@@ -1,6 +1,19 @@
 # MCP Gatekeeper
 
-AIアシスタント向けに、安全なシェルコマンド実行とHTTPプロキシ機能を提供するMCP（Model Context Protocol）サーバーです。
+[![Go](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![MCP](https://img.shields.io/badge/MCP-2025--11-green)](https://modelcontextprotocol.io/)
+
+AIアシスタントが安全にシェルコマンドを実行できるようにする、セキュリティ重視のMCP（Model Context Protocol）ゲートウェイです。
+
+**なぜ MCP Gatekeeper？**
+
+- **セキュリティファースト**: ポリシーベースの引数検証、環境変数フィルタリング、サンドボックス（bubblewrap/WASM）による多層防御
+- **柔軟なデプロイ**: Claude Desktop向けstdioサーバー、Webサービス向けHTTP API、既存MCPサーバー向けブリッジプロキシとして動作
+- **Bridgeモード**: stdio MCPサーバー（Playwright、filesystem等）を認証・レート制限・大容量レスポンス対応付きでHTTP公開
+- **OAuth 2.0対応**: クライアントクレデンシャルフローによるM2M認証（[MCP SEP-1046](https://github.com/modelcontextprotocol/ext-auth)）
+- **プラグインアーキテクチャ**: GlobパターンでシンプルなJSON定義によるツール設定
+- **リッチUI対応**: MCP Appsによるコマンド出力のインタラクティブHTML表示
 
 ## アーキテクチャ
 
