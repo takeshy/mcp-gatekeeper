@@ -10,6 +10,102 @@
       "ui_type": "log"
     },
     {
+      "name": "git-changes",
+      "description": "Interactive view of staged/unstaged changes and commit history",
+      "command": "git",
+      "args_prefix": ["log", "--pretty=format:%H|%h|%an|%ar|%s", "-n", "20"],
+      "allowed_arg_globs": ["", "*"],
+      "sandbox": "none",
+      "ui_template": "templates/changes.html",
+      "ui_config": {
+        "csp": {
+          "resource_domains": ["esm.sh"]
+        },
+        "visibility": ["model", "app"]
+      }
+    },
+    {
+      "name": "git-staged-files",
+      "description": "Get list of staged files (app-only)",
+      "command": "git",
+      "args_prefix": ["diff", "--cached", "--name-status"],
+      "allowed_arg_globs": [""],
+      "sandbox": "none",
+      "ui_config": {
+        "visibility": ["app"]
+      }
+    },
+    {
+      "name": "git-unstaged-files",
+      "description": "Get list of unstaged files (app-only)",
+      "command": "git",
+      "args_prefix": ["diff", "--name-status"],
+      "allowed_arg_globs": [""],
+      "sandbox": "none",
+      "ui_config": {
+        "visibility": ["app"]
+      }
+    },
+    {
+      "name": "git-staged-diff",
+      "description": "Get staged diff for a file (app-only)",
+      "command": "git",
+      "args_prefix": ["diff", "--cached", "--"],
+      "allowed_arg_globs": ["**"],
+      "sandbox": "none",
+      "ui_config": {
+        "visibility": ["app"]
+      }
+    },
+    {
+      "name": "git-unstaged-diff",
+      "description": "Get unstaged diff for a file (app-only)",
+      "command": "git",
+      "args_prefix": ["diff", "--"],
+      "allowed_arg_globs": ["**"],
+      "sandbox": "none",
+      "ui_config": {
+        "visibility": ["app"]
+      }
+    },
+    {
+      "name": "git-commits",
+      "description": "Interactive git commit explorer with file changes and diffs",
+      "command": "git",
+      "args_prefix": ["log", "--pretty=format:%H|%h|%an|%ar|%s", "-n", "20"],
+      "allowed_arg_globs": ["", "*"],
+      "sandbox": "none",
+      "ui_template": "templates/commits.html",
+      "ui_config": {
+        "csp": {
+          "resource_domains": ["esm.sh"]
+        },
+        "visibility": ["model", "app"]
+      }
+    },
+    {
+      "name": "git-commit-files",
+      "description": "Get list of changed files for a commit (app-only)",
+      "command": "git",
+      "args_prefix": ["diff-tree", "--no-commit-id", "--name-status", "-r"],
+      "allowed_arg_globs": ["**"],
+      "sandbox": "none",
+      "ui_config": {
+        "visibility": ["app"]
+      }
+    },
+    {
+      "name": "git-file-diff",
+      "description": "Get diff for a specific file in a commit (app-only)",
+      "command": "git",
+      "args_prefix": ["show", "--format="],
+      "allowed_arg_globs": ["**"],
+      "sandbox": "none",
+      "ui_config": {
+        "visibility": ["app"]
+      }
+    },
+    {
       "name": "git-log",
       "description": "Show git commit log",
       "command": "git",
@@ -77,7 +173,7 @@
       "description": "Show file blame",
       "command": "git",
       "args_prefix": ["blame"],
-      "allowed_arg_globs": ["*"],
+      "allowed_arg_globs": ["**"],
       "sandbox": "none",
       "ui_type": "log"
     }

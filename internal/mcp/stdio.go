@@ -195,9 +195,13 @@ func (s *StdioServer) handleToolsList(req *Request) (*Response, error) {
 	// Get tools from plugins
 	pluginTools := s.plugins.ListTools()
 
-	tools := make([]Tool, len(pluginTools))
-	for i, t := range pluginTools {
-		tools[i] = Tool{
+	tools := make([]Tool, 0, len(pluginTools))
+	for _, t := range pluginTools {
+		// Filter out tools that are not visible to the model
+		if !t.IsVisibleToModel() {
+			continue
+		}
+		tools = append(tools, Tool{
 			Name:        t.Name,
 			Description: t.Description,
 			InputSchema: InputSchema{
@@ -216,7 +220,7 @@ func (s *StdioServer) handleToolsList(req *Request) (*Response, error) {
 				Required: []string{},
 			},
 			Meta: BuildToolMeta(t),
-		}
+		})
 	}
 	return NewResponse(req.ID, &ListToolsResult{Tools: tools}), nil
 }
@@ -336,6 +340,7 @@ func (s *StdioServer) handleResourcesList(req *Request) (*Response, error) {
 				Name:        fmt.Sprintf("%s UI", t.Name),
 				Description: fmt.Sprintf("Interactive UI for %s tool", t.Name),
 				MimeType:    "text/html",
+				Meta:        BuildResourceMeta(t),
 			})
 		}
 	}

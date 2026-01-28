@@ -27,12 +27,12 @@ An MCP (Model Context Protocol) server that provides secure shell command execut
 │  │  Allowed Env Variables: ["PATH", "HOME", "LANG", "GIT_*"]           │   │
 │  │                                                                     │   │
 │  │  ┌─────────────────────────────────────────────────────────────┐   │   │
-│  │  │  Tool: "git-log"                                            │   │   │
+│  │  │  Tool: "git-status"                                         │   │   │
 │  │  │  ├─ Command: git                                            │   │   │
-│  │  │  ├─ Args Prefix: ["log"]                                    │   │   │
-│  │  │  ├─ Allowed Args: ["", "*"]                                 │   │   │
+│  │  │  ├─ Args Prefix: ["status"]                                 │   │   │
+│  │  │  ├─ Allowed Args: ["", "--short"]                           │   │   │
 │  │  │  ├─ Sandbox: none                                           │   │   │
-│  │  │  └─ UI Template: templates/log.html                         │   │   │
+│  │  │  └─ UI Type: log                                            │   │   │
 │  │  └─────────────────────────────────────────────────────────────┘   │   │
 │  │                                                                     │   │
 │  │  ┌─────────────────────────────────────────────────────────────┐   │   │
@@ -116,19 +116,20 @@ my-plugin/
 {
   "tools": [
     {
-      "name": "git-log",
-      "description": "Show git commit log",
+      "name": "git-status",
+      "description": "Show git repository status",
       "command": "git",
-      "args_prefix": ["log"],
-      "allowed_arg_globs": ["", "*"],
+      "args_prefix": ["status"],
+      "allowed_arg_globs": ["", "--short", "--branch"],
       "sandbox": "none",
-      "ui_template": "templates/log.html"
+      "ui_type": "log"
     },
     {
       "name": "ls",
       "description": "List directory contents",
       "command": "ls",
-      "allowed_arg_globs": ["*"],
+      "args_prefix": ["-la"],
+      "allowed_arg_globs": ["", "**"],
       "sandbox": "bubblewrap",
       "ui_type": "log"
     }
@@ -137,7 +138,7 @@ my-plugin/
 }
 ```
 
-**Note**: `args_prefix` defines fixed arguments that are automatically prepended. With `args_prefix: ["log"]`, calling `git-log` with `args: ["--oneline"]` executes `git log --oneline`. The `allowed_arg_globs` validates user-provided args only (not the prefix).
+**Note**: `args_prefix` defines fixed arguments that are automatically prepended. With `args_prefix: ["-la"]`, calling `ls` with `args: ["/tmp"]` executes `ls -la /tmp`. The `allowed_arg_globs` validates user-provided args only (not the prefix).
 
 ### 2. Start the Server
 
@@ -257,7 +258,7 @@ Tool names must be unique across all plugins.
 | `name` | Yes | Unique tool name |
 | `description` | No | Tool description |
 | `command` | Yes* | Executable path (*not required for wasm) |
-| `args_prefix` | No | Fixed arguments prepended to user args (e.g., `["log"]` for git-log) |
+| `args_prefix` | No | Fixed arguments prepended to user args (e.g., `["-la"]` for ls) |
 | `allowed_arg_globs` | No | Glob patterns for allowed user arguments (evaluated before args_prefix) |
 | `sandbox` | No | `none`, `bubblewrap`, or `wasm` (default: `none`) |
 | `wasm_binary` | Yes* | WASM binary path (*required when sandbox=wasm) |
@@ -386,6 +387,7 @@ GOOS=wasip1 GOARCH=wasm go build -o tool.wasm main.go
 
 | Pattern | Description |
 |---------|-------------|
+| `""` | **Empty string - allows calling with no arguments** |
 | `*` | Any string except `/` |
 | `**` | Any string including `/` |
 | `?` | Single character |
@@ -393,9 +395,13 @@ GOOS=wasip1 GOARCH=wasm go build -o tool.wasm main.go
 | `{a,b}` | Alternation |
 
 Examples:
-- `status **` - matches `status`, `status .`, `status --short`
+- `[""]` - allows only no arguments (e.g., `git status` with no args)
+- `["", "--short"]` - allows no arguments OR `--short`
+- `["**"]` - allows any arguments (equivalent to omitting `allowed_arg_globs`)
 - `*.txt` - matches any `.txt` file
 - `--format=*` - matches any `--format=` option
+
+> **Important**: If you want to allow calling a tool with no arguments, you must include `""` in `allowed_arg_globs`. Without it, the tool requires at least one argument.
 
 ## MCP Apps UI Support
 
@@ -428,6 +434,54 @@ Tools can return interactive UI components instead of plain text. MCP clients li
 | `ui_type` | `table`, `json`, or `log` |
 | `output_format` | `json`, `csv`, or `lines` (for table parsing) |
 | `ui_template` | Path to custom HTML template (overrides ui_type) |
+| `ui_config` | Advanced UI configuration (see below) |
+
+### UI Configuration
+
+The `ui_config` field provides fine-grained control over UI behavior:
+
+```json
+{
+  "name": "file-explorer",
+  "description": "Interactive file explorer",
+  "command": "ls",
+  "args_prefix": ["-la"],
+  "allowed_arg_globs": ["", "**"],
+  "sandbox": "none",
+  "ui_template": "templates/explorer.html",
+  "ui_config": {
+    "csp": {
+      "resource_domains": ["esm.sh"]
+    },
+    "visibility": ["model", "app"]
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `csp.resource_domains` | Allowed external domains for CSP (e.g., CDN for MCP App SDK) |
+| `visibility` | Tool visibility: `["model", "app"]` (default) or `["app"]` (app-only) |
+
+### App-Only Tools
+
+Tools with `visibility: ["app"]` are hidden from the model but can be called from UI via MCP Apps SDK. This is useful for helper tools that the main UI calls dynamically:
+
+```json
+{
+  "name": "git-staged-diff",
+  "description": "Get staged diff for a file (app-only)",
+  "command": "git",
+  "args_prefix": ["diff", "--cached", "--"],
+  "allowed_arg_globs": ["**"],
+  "sandbox": "none",
+  "ui_config": {
+    "visibility": ["app"]
+  }
+}
+```
+
+**Note**: Use `**` (not `*`) in `allowed_arg_globs` when paths containing `/` need to be matched.
 
 ### Custom Templates
 
@@ -435,22 +489,23 @@ Create fully custom UIs with Go templates:
 
 ```json
 {
-  "name": "git-log",
-  "command": "git",
-  "ui_template": "templates/log.html"
+  "name": "process-list",
+  "command": "ps",
+  "args_prefix": ["aux"],
+  "ui_template": "templates/process.html"
 }
 ```
 
 Template variables:
 - `{{.Output}}` - Raw output string
-- `{{.Lines}}` - Output split by lines
+- `{{.Lines}}` - Output split by lines (array)
 - `{{.JSON}}` - Parsed JSON (if valid)
 - `{{.JSONPretty}}` - Pretty-printed JSON
 - `{{.IsJSON}}` - Whether output is valid JSON
 
 Template functions:
 - `{{escape .Output}}` - HTML escape
-- `{{json .Data}}` - JSON encode
+- `{{json .Data}}` - JSON encode (returns `template.JS` for safe embedding)
 - `{{jsonPretty .Data}}` - Pretty JSON encode
 - `{{split .String " "}}` - Split string by delimiter
 - `{{join .Array " "}}` - Join array with delimiter
@@ -464,21 +519,68 @@ Example template:
 ```html
 <!DOCTYPE html>
 <html>
-<head><title>Git Log</title></head>
+<head><title>Process List</title></head>
 <body>
-  <h1>Commits ({{len .Lines}})</h1>
+  <h1>Processes ({{len .Lines}})</h1>
+  <table>
   {{range .Lines}}
   {{if trimSpace .}}
-  {{$parts := split . " "}}
-  <div class="commit">
-    <span class="hash">{{first $parts}}</span>
-    <span class="message">{{escape (join (slice $parts 1) " ")}}</span>
-  </div>
+  <tr><td>{{escape .}}</td></tr>
   {{end}}
   {{end}}
+  </table>
 </body>
 </html>
 ```
+
+### Interactive Templates with MCP Apps SDK
+
+Templates can use the MCP Apps SDK for bidirectional communication, allowing the UI to call other tools dynamically:
+
+```html
+<script type="module">
+// MCP Apps compatibility layer
+// Supports both window.mcpApps (obsidian-gemini-helper) and @anthropic-ai/mcp-app-sdk
+let mcpClient = null;
+
+async function initMcpClient() {
+  // Check for injected bridge first (obsidian-gemini-helper)
+  if (window.mcpApps && typeof window.mcpApps.callTool === 'function') {
+    return {
+      callServerTool: (name, args) => window.mcpApps.callTool(name, args),
+      type: 'bridge'
+    };
+  }
+
+  // Fall back to MCP App SDK
+  try {
+    const { App } = await import('https://esm.sh/@anthropic-ai/mcp-app-sdk@0.1');
+    const app = new App({ name: 'My App', version: '1.0.0' });
+    await app.connect();
+    return {
+      callServerTool: (name, args) => app.callServerTool(name, args),
+      type: 'sdk'
+    };
+  } catch (e) {
+    console.log('MCP App SDK not available:', e.message);
+    return null;
+  }
+}
+
+// Initialize and use
+mcpClient = await initMcpClient();
+if (mcpClient) {
+  // Call an app-only tool
+  const result = await mcpClient.callServerTool('git-staged-diff', { args: ['file.txt'] });
+  console.log(result.content[0].text);
+}
+
+// Initialize data from template
+const initialData = {{json .Lines}};  // Safe JS embedding
+</script>
+```
+
+**Important**: When using `{{json .Lines}}` or similar template functions in JavaScript, the output is automatically safe for embedding (returns `template.JS` type to prevent double-escaping).
 
 ### How It Works
 
@@ -493,19 +595,38 @@ See the `examples/plugins/` directory:
 ```
 examples/plugins/
 ├── git/
-│   ├── plugin.json      # Git commands (status, log, diff, branch, etc.)
+│   ├── plugin.json      # Git commands with interactive UI
 │   └── templates/
+│       ├── changes.html # Interactive staged/unstaged changes viewer
+│       ├── commits.html # Interactive commit explorer
 │       ├── log.html     # Custom UI for git log
 │       └── diff.html    # Custom UI for git diff
+├── interactive/
+│   ├── plugin.json      # File explorer with bidirectional MCP Apps
+│   └── templates/
+│       └── explorer.html
 └── shell/
     ├── plugin.json      # Shell commands (ls, cat, find, grep)
     └── templates/
         └── table.html   # Custom table UI
 ```
 
-To use example plugins:
+### Interactive Git Plugin
+
+The git plugin demonstrates bidirectional MCP Apps communication:
+
+- **git-changes**: Shows staged/unstaged files in an accordion UI. Click a file to view its diff (loaded dynamically via app-only tools).
+- **git-commits**: Browse commit history. Click a commit to see changed files, click a file to see its diff.
+
+App-only helper tools (`visibility: ["app"]`):
+- `git-staged-files`, `git-unstaged-files`: List files for the UI
+- `git-staged-diff`, `git-unstaged-diff`: Get diffs for selected files
+- `git-commit-files`, `git-file-diff`: Get commit details
+
+To try the interactive examples:
 ```bash
-./mcp-gatekeeper --plugins-dir=examples/plugins --root-dir=. --addr=:8080
+cd /path/to/your/git/repo
+./mcp-gatekeeper --plugins-dir=examples/plugins --root-dir=.
 ```
 
 ## License

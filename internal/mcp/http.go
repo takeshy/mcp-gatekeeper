@@ -285,9 +285,13 @@ func (s *HTTPServer) hasUIEnabledTools() bool {
 func (s *HTTPServer) handleMCPToolsList(req *Request) *Response {
 	pluginTools := s.plugins.ListTools()
 
-	tools := make([]Tool, len(pluginTools))
-	for i, t := range pluginTools {
-		tools[i] = Tool{
+	tools := make([]Tool, 0, len(pluginTools))
+	for _, t := range pluginTools {
+		// Filter out tools that are not visible to the model
+		if !t.IsVisibleToModel() {
+			continue
+		}
+		tools = append(tools, Tool{
 			Name:        t.Name,
 			Description: t.Description,
 			InputSchema: InputSchema{
@@ -306,7 +310,7 @@ func (s *HTTPServer) handleMCPToolsList(req *Request) *Response {
 				Required: []string{},
 			},
 			Meta: BuildToolMeta(t),
-		}
+		})
 	}
 	return NewResponse(req.ID, &ListToolsResult{Tools: tools})
 }
@@ -411,6 +415,7 @@ func (s *HTTPServer) handleMCPResourcesList(req *Request) *Response {
 				Name:        fmt.Sprintf("%s UI", t.Name),
 				Description: fmt.Sprintf("Interactive UI for %s tool", t.Name),
 				MimeType:    "text/html",
+				Meta:        BuildResourceMeta(t),
 			})
 		}
 	}

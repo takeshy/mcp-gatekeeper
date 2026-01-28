@@ -37,6 +37,31 @@ const (
 	OutputFormatLines OutputFormat = "lines"
 )
 
+// VisibilityType represents where a tool is visible
+type VisibilityType string
+
+const (
+	VisibilityModel VisibilityType = "model" // Visible to the AI model via tools/list
+	VisibilityApp   VisibilityType = "app"   // Visible to UI apps via callServerTool
+)
+
+// UICSPConfig represents Content Security Policy settings for the UI
+type UICSPConfig struct {
+	ResourceDomains []string `json:"resource_domains,omitempty"` // Allowed domains (e.g., ["esm.sh"])
+}
+
+// UIPermissions represents permissions granted to the UI
+type UIPermissions struct {
+	ClipboardWrite bool `json:"clipboard_write,omitempty"` // Allow writing to clipboard
+}
+
+// UIConfig represents UI-specific configuration for a tool
+type UIConfig struct {
+	CSP         *UICSPConfig     `json:"csp,omitempty"`
+	Permissions *UIPermissions   `json:"permissions,omitempty"`
+	Visibility  []VisibilityType `json:"visibility,omitempty"` // Default: ["model", "app"]
+}
+
 // Tool represents a tool definition from a plugin file
 type Tool struct {
 	Name            string      `json:"name"`
@@ -50,6 +75,35 @@ type Tool struct {
 	UIType       UIType       `json:"ui_type,omitempty"`
 	OutputFormat OutputFormat `json:"output_format,omitempty"`
 	UITemplate   string       `json:"ui_template,omitempty"` // Path to custom HTML template
+	UIConfig     *UIConfig    `json:"ui_config,omitempty"`   // Advanced UI configuration (CSP, permissions, visibility)
+}
+
+// IsVisibleToModel returns true if the tool should be included in tools/list
+func (t *Tool) IsVisibleToModel() bool {
+	// If no UIConfig or no visibility specified, default to visible to model
+	if t.UIConfig == nil || len(t.UIConfig.Visibility) == 0 {
+		return true
+	}
+	for _, v := range t.UIConfig.Visibility {
+		if v == VisibilityModel {
+			return true
+		}
+	}
+	return false
+}
+
+// IsVisibleToApp returns true if the tool can be called from UI apps
+func (t *Tool) IsVisibleToApp() bool {
+	// If no UIConfig or no visibility specified, default to visible to app
+	if t.UIConfig == nil || len(t.UIConfig.Visibility) == 0 {
+		return true
+	}
+	for _, v := range t.UIConfig.Visibility {
+		if v == VisibilityApp {
+			return true
+		}
+	}
+	return false
 }
 
 // PluginFile represents the structure of a plugin JSON file

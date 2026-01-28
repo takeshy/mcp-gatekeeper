@@ -207,10 +207,11 @@ func NewErrorResponse(id json.RawMessage, code int, message string, data any) *R
 
 // Resource represents an MCP resource
 type Resource struct {
-	URI         string `json:"uri"`
-	Name        string `json:"name,omitempty"`
-	Description string `json:"description,omitempty"`
-	MimeType    string `json:"mimeType,omitempty"`
+	URI         string                 `json:"uri"`
+	Name        string                 `json:"name,omitempty"`
+	Description string                 `json:"description,omitempty"`
+	MimeType    string                 `json:"mimeType,omitempty"`
+	Meta        map[string]interface{} `json:"_meta,omitempty"`
 }
 
 // ListResourcesResult represents the result of resources/list request

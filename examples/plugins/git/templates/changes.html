@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Git Changes</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #0d1117;
+  color: #c9d1d9;
+  min-height: 100vh;
+}
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+}
+.header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #30363d;
+}
+.header h1 { font-size: 20px; font-weight: 600; }
+.header .refresh-btn {
+  margin-left: auto;
+  padding: 8px 16px;
+  background: #238636;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.header .refresh-btn:hover { background: #2ea043; }
+.header .refresh-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.status { font-size: 12px; color: #8b949e; }
+
+.section {
+  margin-bottom: 16px;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.section-header {
+  padding: 12px 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #161b22;
+  transition: background 0.15s;
+}
+.section-header:hover { background: #1f2428; }
+.section-toggle {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #8b949e;
+  transition: transform 0.2s;
+}
+.section.expanded .section-toggle { transform: rotate(90deg); }
+.section-title { font-weight: 600; flex: 1; }
+.section-badge {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 500;
+}
+.section-badge.staged { background: #238636; color: white; }
+.section-badge.unstaged { background: #9e6a03; color: white; }
+.section-badge.commits { background: #388bfd; color: white; }
+.section-body { display: none; border-top: 1px solid #30363d; }
+.section.expanded .section-body { display: block; }
+
+.empty-section {
+  padding: 20px;
+  text-align: center;
+  color: #8b949e;
+  font-size: 13px;
+}
+
+.file-list { padding: 8px; }
+.file-item {
+  padding: 8px 12px;
+  margin: 4px 0;
+  background: #0d1117;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: 'Monaco', 'Menlo', monospace;
+  font-size: 13px;
+  transition: background 0.15s;
+}
+.file-item:hover { background: #1f2428; }
+.file-item.selected { background: #388bfd33; border: 1px solid #388bfd; }
+.file-status {
+  width: 20px;
+  text-align: center;
+  font-weight: 600;
+  font-size: 11px;
+}
+.file-status.added { color: #3fb950; }
+.file-status.modified { color: #d29922; }
+.file-status.deleted { color: #f85149; }
+.file-status.renamed { color: #a371f7; }
+.file-name { flex: 1; color: #c9d1d9; word-break: break-all; }
+
+.diff-panel {
+  border-top: 1px solid #30363d;
+  max-height: 400px;
+  overflow: auto;
+  background: #0d1117;
+}
+.diff-header {
+  padding: 8px 16px;
+  background: #161b22;
+  font-size: 12px;
+  color: #8b949e;
+  position: sticky;
+  top: 0;
+  border-bottom: 1px solid #30363d;
+}
+.diff-content { padding: 0; font-family: 'Monaco', 'Menlo', monospace; font-size: 12px; line-height: 1.5; }
+.diff-line { padding: 0 16px; white-space: pre-wrap; word-break: break-all; }
+.diff-line.addition { background: #2ea04326; color: #3fb950; }
+.diff-line.deletion { background: #f8514926; color: #f85149; }
+.diff-line.hunk { background: #388bfd26; color: #58a6ff; }
+
+.commit-list { max-height: 400px; overflow-y: auto; }
+.commit-item {
+  padding: 12px 16px;
+  border-bottom: 1px solid #21262d;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.commit-item:hover { background: #1f2428; }
+.commit-item:last-child { border-bottom: none; }
+.commit-item.expanded { background: #1f2428; }
+.commit-message { font-weight: 500; color: #c9d1d9; margin-bottom: 4px; word-break: break-word; }
+.commit-meta { font-size: 12px; color: #8b949e; display: flex; gap: 12px; flex-wrap: wrap; }
+.commit-hash {
+  font-family: 'Monaco', 'Menlo', monospace;
+  font-size: 12px;
+  color: #58a6ff;
+}
+.commit-files {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #30363d;
+  display: none;
+}
+.commit-item.expanded .commit-files { display: block; }
+
+.loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px;
+  color: #8b949e;
+  font-size: 13px;
+}
+.spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid #30363d;
+  border-top-color: #58a6ff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>Git Changes</h1>
+    <span id="status" class="status"></span>
+    <button id="refresh-btn" class="refresh-btn">Refresh</button>
+  </div>
+
+  <div id="unstaged-section" class="section expanded">
+    <div class="section-header" data-action="toggle-section" data-section="unstaged">
+      <div class="section-toggle">&#9654;</div>
+      <div class="section-title">Unstaged Changes</div>
+      <div class="section-badge unstaged" id="unstaged-count">0</div>
+    </div>
+    <div class="section-body" id="unstaged-body">
+      <div class="loading"><div class="spinner"></div>Loading...</div>
+    </div>
+  </div>
+
+  <div id="staged-section" class="section">
+    <div class="section-header" data-action="toggle-section" data-section="staged">
+      <div class="section-toggle">&#9654;</div>
+      <div class="section-title">Staged Changes</div>
+      <div class="section-badge staged" id="staged-count">0</div>
+    </div>
+    <div class="section-body" id="staged-body">
+      <div class="loading"><div class="spinner"></div>Loading...</div>
+    </div>
+  </div>
+
+  <div id="commits-section" class="section">
+    <div class="section-header" data-action="toggle-section" data-section="commits">
+      <div class="section-toggle">&#9654;</div>
+      <div class="section-title">Commit History</div>
+      <div class="section-badge commits" id="commits-count">0</div>
+    </div>
+    <div class="section-body" id="commits-body">
+      <div class="loading"><div class="spinner"></div>Loading...</div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+// MCP Apps compatibility layer
+// Supports both window.mcpApps (obsidian-gemini-helper) and @anthropic-ai/mcp-app-sdk
+let mcpClient = null;
+
+async function initMcpClient() {
+  // Check for injected bridge first (obsidian-gemini-helper)
+  if (window.mcpApps && typeof window.mcpApps.callTool === 'function') {
+    return {
+      callServerTool: (name, args) => window.mcpApps.callTool(name, args),
+      type: 'bridge'
+    };
+  }
+
+  // Fall back to MCP App SDK
+  try {
+    const { App } = await import('https://esm.sh/@anthropic-ai/mcp-app-sdk@0.1');
+    const app = new App({ name: 'Git Changes', version: '1.0.0' });
+    await app.connect();
+    return {
+      callServerTool: (name, args) => app.callServerTool(name, args),
+      type: 'sdk'
+    };
+  } catch (e) {
+    console.log('MCP App SDK not available:', e.message);
+    return null;
+  }
+}
+
+const state = {
+  staged: { files: [], selectedFile: null, diffs: {}, loaded: false },
+  unstaged: { files: [], selectedFile: null, diffs: {}, loaded: false },
+  commits: { list: [], expanded: null, files: {}, selectedFile: null, diffs: {} },
+  sections: { staged: false, unstaged: true, commits: false }
+};
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function parseFileStatus(status) {
+  const map = {
+    'A': { class: 'added', label: 'A' },
+    'M': { class: 'modified', label: 'M' },
+    'D': { class: 'deleted', label: 'D' },
+    'R': { class: 'renamed', label: 'R' }
+  };
+  return map[status[0]] || { class: 'modified', label: status[0] };
+}
+
+function parseFiles(output) {
+  if (!output.trim()) return [];
+  return output.trim().split('\n').map(line => {
+    const [status, ...pathParts] = line.split('\t');
+    return { status: status || 'M', path: pathParts.join('\t') || '' };
+  }).filter(f => f.path);
+}
+
+function parseCommits(lines) {
+  if (!Array.isArray(lines)) {
+    // Fallback for string input
+    lines = (lines || '').trim().split('\n');
+  }
+  return lines.map(line => {
+    if (!line || !line.trim()) return null;
+    const [hash, shortHash, author, date, ...msg] = line.split('|');
+    return { hash, shortHash, author, date, message: msg.join('|') };
+  }).filter(c => c && c.hash);
+}
+
+function renderDiff(diff) {
+  if (diff === undefined || diff === null) return '<div class="empty-section">No changes</div>';
+  if (diff === '') return '<div class="empty-section">No diff available</div>';
+  return diff.split('\n').map(line => {
+    let cls = '';
+    if (line.startsWith('+') && !line.startsWith('+++')) cls = 'addition';
+    else if (line.startsWith('-') && !line.startsWith('---')) cls = 'deletion';
+    else if (line.startsWith('@@')) cls = 'hunk';
+    return '<div class="diff-line ' + cls + '">' + escapeHtml(line) + '</div>';
+  }).join('');
+}
+
+function renderFileList(files, selectedIndex, sectionType, diffHtml) {
+  if (files.length === 0) {
+    return '<div class="empty-section">No changes</div>';
+  }
+
+  return '<div class="file-list">' + files.map((file, i) => {
+    const status = parseFileStatus(file.status);
+    const isSelected = selectedIndex === i;
+    let html = `
+      <div class="file-item${isSelected ? ' selected' : ''}"
+           data-action="select-file"
+           data-section="${sectionType}"
+           data-index="${i}">
+        <span class="file-status ${status.class}">${status.label}</span>
+        <span class="file-name">${escapeHtml(file.path)}</span>
+      </div>
+    `;
+    // Insert diff panel right after the selected file
+    if (isSelected && diffHtml) {
+      html += diffHtml;
+    }
+    return html;
+  }).join('') + '</div>';
+}
+
+function renderStagedSection() {
+  const body = document.getElementById('staged-body');
+  const fileList = body.querySelector('.file-list');
+  const scrollTop = fileList ? fileList.scrollTop : 0;
+  const { files, selectedFile, diffs } = state.staged;
+
+  document.getElementById('staged-count').textContent = files.length;
+
+  let diffHtml = null;
+  if (selectedFile !== null && files[selectedFile]) {
+    const file = files[selectedFile];
+    const diff = diffs[file.path];
+    diffHtml = `
+      <div class="diff-panel">
+        <div class="diff-header">${escapeHtml(file.path)} (staged vs HEAD)</div>
+        <div class="diff-content">${diff !== undefined ? renderDiff(diff) : '<div class="loading"><div class="spinner"></div>Loading diff...</div>'}</div>
+      </div>
+    `;
+  }
+
+  body.innerHTML = renderFileList(files, selectedFile, 'staged', diffHtml);
+  requestAnimationFrame(() => {
+    const newFileList = body.querySelector('.file-list');
+    if (newFileList) newFileList.scrollTop = scrollTop;
+  });
+}
+
+function renderUnstagedSection() {
+  const body = document.getElementById('unstaged-body');
+  const fileList = body.querySelector('.file-list');
+  const scrollTop = fileList ? fileList.scrollTop : 0;
+  const { files, selectedFile, diffs } = state.unstaged;
+
+  document.getElementById('unstaged-count').textContent = files.length;
+
+  let diffHtml = null;
+  if (selectedFile !== null && files[selectedFile]) {
+    const file = files[selectedFile];
+    const diff = diffs[file.path];
+    diffHtml = `
+      <div class="diff-panel">
+        <div class="diff-header">${escapeHtml(file.path)} (working vs staged)</div>
+        <div class="diff-content">${diff !== undefined ? renderDiff(diff) : '<div class="loading"><div class="spinner"></div>Loading diff...</div>'}</div>
+      </div>
+    `;
+  }
+
+  body.innerHTML = renderFileList(files, selectedFile, 'unstaged', diffHtml);
+  requestAnimationFrame(() => {
+    const newFileList = body.querySelector('.file-list');
+    if (newFileList) newFileList.scrollTop = scrollTop;
+  });
+}
+
+function renderCommitsSection() {
+  const body = document.getElementById('commits-body');
+  const commitList = body.querySelector('.commit-list');
+  const scrollTop = commitList ? commitList.scrollTop : 0;
+  const { list, expanded, files, selectedFile, diffs } = state.commits;
+
+  document.getElementById('commits-count').textContent = list.length;
+
+  if (list.length === 0) {
+    body.innerHTML = '<div class="empty-section">No commits</div>';
+    return;
+  }
+
+  body.innerHTML = '<div class="commit-list">' + list.map((commit, i) => {
+    const isExpanded = expanded === i;
+    const commitFiles = files[commit.hash] || [];
+
+    let filesHtml = '';
+    if (isExpanded) {
+      if (!files[commit.hash]) {
+        filesHtml = '<div class="loading"><div class="spinner"></div>Loading files...</div>';
+      } else {
+        let diffHtml = null;
+        if (selectedFile !== null && commitFiles[selectedFile]) {
+          const file = commitFiles[selectedFile];
+          const cacheKey = commit.hash + ':' + file.path;
+          const diff = diffs[cacheKey];
+          diffHtml = `
+            <div class="diff-panel">
+              <div class="diff-header">${escapeHtml(file.path)}</div>
+              <div class="diff-content">${diff !== undefined ? renderDiff(diff) : '<div class="loading"><div class="spinner"></div>Loading diff...</div>'}</div>
+            </div>
+          `;
+        }
+        filesHtml = renderFileList(commitFiles, selectedFile, 'commit', diffHtml);
+      }
+    }
+
+    return `
+      <div class="commit-item${isExpanded ? ' expanded' : ''}" data-action="toggle-commit" data-index="${i}">
+        <div class="commit-message">${escapeHtml(commit.message)}</div>
+        <div class="commit-meta">
+          <span class="commit-hash">${escapeHtml(commit.shortHash)}</span>
+          <span>${escapeHtml(commit.author)}</span>
+          <span>${escapeHtml(commit.date)}</span>
+        </div>
+        <div class="commit-files">${filesHtml}</div>
+      </div>
+    `;
+  }).join('') + '</div>';
+
+  // Restore scroll position
+  requestAnimationFrame(() => {
+    const newCommitList = body.querySelector('.commit-list');
+    if (newCommitList) newCommitList.scrollTop = scrollTop;
+  });
+}
+
+function updateSectionUI(sectionName) {
+  const section = document.getElementById(sectionName + '-section');
+  section.classList.toggle('expanded', state.sections[sectionName]);
+}
+
+async function loadStagedFiles() {
+  if (!mcpClient || state.staged.loaded) return;
+
+  try {
+    const result = await mcpClient.callServerTool('git-staged-files', {});
+    state.staged.files = parseFiles(result?.content?.[0]?.text || '');
+    state.staged.loaded = true;
+    renderStagedSection();
+  } catch (e) {
+    console.error('Failed to load staged files:', e);
+  }
+}
+
+async function loadUnstagedFiles() {
+  if (!mcpClient || state.unstaged.loaded) return;
+
+  try {
+    const result = await mcpClient.callServerTool('git-unstaged-files', {});
+    state.unstaged.files = parseFiles(result?.content?.[0]?.text || '');
+    state.unstaged.loaded = true;
+    renderUnstagedSection();
+  } catch (e) {
+    console.error('Failed to load unstaged files:', e);
+  }
+}
+
+async function loadStagedDiff(filePath) {
+  if (!mcpClient || state.staged.diffs[filePath] !== undefined) return;
+
+  try {
+    const result = await mcpClient.callServerTool('git-staged-diff', { args: [filePath] });
+    state.staged.diffs[filePath] = result?.content?.[0]?.text || '';
+    renderStagedSection();
+  } catch (e) {
+    console.error('Failed to load staged diff:', e);
+  }
+}
+
+async function loadUnstagedDiff(filePath) {
+  if (!mcpClient || state.unstaged.diffs[filePath] !== undefined) return;
+
+  try {
+    const result = await mcpClient.callServerTool('git-unstaged-diff', { args: [filePath] });
+    state.unstaged.diffs[filePath] = result?.content?.[0]?.text || '';
+    renderUnstagedSection();
+  } catch (e) {
+    console.error('Failed to load unstaged diff:', e);
+  }
+}
+
+async function loadCommitFiles(commitIndex) {
+  const commit = state.commits.list[commitIndex];
+  if (!mcpClient || !commit || state.commits.files[commit.hash]) return;
+
+  try {
+    const result = await mcpClient.callServerTool('git-commit-files', { args: [commit.hash] });
+    state.commits.files[commit.hash] = parseFiles(result?.content?.[0]?.text || '');
+    renderCommitsSection();
+  } catch (e) {
+    console.error('Failed to load commit files:', e);
+  }
+}
+
+async function loadCommitDiff(commitIndex, fileIndex) {
+  const commit = state.commits.list[commitIndex];
+  const files = state.commits.files[commit.hash];
+  const file = files?.[fileIndex];
+  if (!mcpClient || !file) return;
+
+  const cacheKey = commit.hash + ':' + file.path;
+  if (state.commits.diffs[cacheKey] !== undefined) return;
+
+  try {
+    const result = await mcpClient.callServerTool('git-file-diff', { args: [commit.hash, '--', file.path] });
+    state.commits.diffs[cacheKey] = result?.content?.[0]?.text || '';
+    renderCommitsSection();
+  } catch (e) {
+    console.error('Failed to load commit diff:', e);
+  }
+}
+
+function toggleSection(sectionName) {
+  state.sections[sectionName] = !state.sections[sectionName];
+  updateSectionUI(sectionName);
+
+  if (state.sections[sectionName]) {
+    if (sectionName === 'staged') loadStagedFiles();
+    if (sectionName === 'unstaged') loadUnstagedFiles();
+  }
+}
+
+function selectFile(sectionType, index) {
+  if (sectionType === 'staged') {
+    state.staged.selectedFile = state.staged.selectedFile === index ? null : index;
+    renderStagedSection();
+    if (state.staged.selectedFile !== null) {
+      loadStagedDiff(state.staged.files[index].path);
+    }
+  } else if (sectionType === 'unstaged') {
+    state.unstaged.selectedFile = state.unstaged.selectedFile === index ? null : index;
+    renderUnstagedSection();
+    if (state.unstaged.selectedFile !== null) {
+      loadUnstagedDiff(state.unstaged.files[index].path);
+    }
+  } else if (sectionType === 'commit') {
+    state.commits.selectedFile = state.commits.selectedFile === index ? null : index;
+    renderCommitsSection();
+    if (state.commits.selectedFile !== null && state.commits.expanded !== null) {
+      loadCommitDiff(state.commits.expanded, index);
+    }
+  }
+}
+
+function toggleCommit(index) {
+  if (state.commits.expanded === index) {
+    state.commits.expanded = null;
+    state.commits.selectedFile = null;
+  } else {
+    state.commits.expanded = index;
+    state.commits.selectedFile = null;
+    loadCommitFiles(index);
+  }
+  renderCommitsSection();
+}
+
+async function refresh() {
+  const btn = document.getElementById('refresh-btn');
+  btn.disabled = true;
+  setStatus('Refreshing...');
+
+  // Reset state
+  state.staged = { files: [], selectedFile: null, diffs: {}, loaded: false };
+  state.unstaged = { files: [], selectedFile: null, diffs: {}, loaded: false };
+  state.commits.files = {};
+  state.commits.selectedFile = null;
+  state.commits.diffs = {};
+  state.commits.expanded = null;
+
+  try {
+    // Load commits
+    const result = await mcpClient.callServerTool('git-changes', {});
+    state.commits.list = parseCommits(result?.content?.[0]?.text || '');
+    renderCommitsSection();
+
+    // Load staged/unstaged if sections are expanded
+    if (state.sections.staged) await loadStagedFiles();
+    if (state.sections.unstaged) await loadUnstagedFiles();
+
+    setStatus('Updated');
+  } catch (e) {
+    setStatus('Error: ' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function setStatus(msg) {
+  document.getElementById('status').textContent = msg;
+}
+
+// Event delegation
+document.addEventListener('click', (e) => {
+  const sectionToggle = e.target.closest('[data-action="toggle-section"]');
+  if (sectionToggle) {
+    e.stopPropagation();
+    toggleSection(sectionToggle.dataset.section);
+    return;
+  }
+
+  const fileItem = e.target.closest('[data-action="select-file"]');
+  if (fileItem) {
+    e.stopPropagation();
+    selectFile(fileItem.dataset.section, parseInt(fileItem.dataset.index, 10));
+    return;
+  }
+
+  const commitItem = e.target.closest('[data-action="toggle-commit"]');
+  if (commitItem) {
+    // Don't toggle if clicking on file list
+    if (e.target.closest('.commit-files')) return;
+    toggleCommit(parseInt(commitItem.dataset.index, 10));
+  }
+});
+
+document.getElementById('refresh-btn').addEventListener('click', refresh);
+
+// Initialize
+async function init() {
+  let initialLines = {{json .Lines}};
+  // Handle case where data comes as JSON string (via iframe bridge)
+  if (typeof initialLines === 'string') {
+    try {
+      initialLines = JSON.parse(initialLines);
+    } catch (e) {
+      initialLines = initialLines.split('\n');
+    }
+  }
+  state.commits.list = parseCommits(initialLines);
+  renderCommitsSection();
+  updateSectionUI('staged');
+  updateSectionUI('unstaged');
+  updateSectionUI('commits');
+
+  mcpClient = await initMcpClient();
+  if (mcpClient) {
+    setStatus('Connected (' + mcpClient.type + ')');
+    // Auto-load staged and unstaged
+    await Promise.all([loadStagedFiles(), loadUnstagedFiles()]);
+  } else {
+    setStatus('Standalone mode');
+  }
+}
+
+init();
+</script>
+</body>
+</html>

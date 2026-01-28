@@ -1,0 +1,44 @@
+{
+  "tools": [
+    {
+      "name": "file-explorer",
+      "description": "Interactive file explorer (always starts at root-dir, use UI to navigate)",
+      "command": "ls",
+      "args_prefix": ["-la", "."],
+      "allowed_arg_globs": [""],
+      "sandbox": "none",
+      "ui_template": "templates/explorer.html",
+      "ui_config": {
+        "csp": {
+          "resource_domains": ["esm.sh"]
+        },
+        "permissions": {
+          "clipboard_write": true
+        },
+        "visibility": ["model", "app"]
+      }
+    },
+    {
+      "name": "list-dir",
+      "description": "List directory contents (app-only, used by file explorer UI)",
+      "command": "ls",
+      "args_prefix": ["-la"],
+      "allowed_arg_globs": ["", "**"],
+      "sandbox": "none",
+      "ui_config": {
+        "visibility": ["app"]
+      }
+    },
+    {
+      "name": "read-file",
+      "description": "Read file contents (app-only, used by file explorer UI)",
+      "command": "cat",
+      "allowed_arg_globs": ["**"],
+      "sandbox": "none",
+      "ui_config": {
+        "visibility": ["app"]
+      }
+    }
+  ],
+  "allowed_env_keys": ["HOME", "USER", "PATH", "LANG", "LC_*"]
+}

@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Git Commit Explorer</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #0d1117;
+  color: #c9d1d9;
+  min-height: 100vh;
+}
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+}
+.header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #30363d;
+}
+.header h1 {
+  font-size: 20px;
+  font-weight: 600;
+}
+.header .refresh-btn {
+  margin-left: auto;
+  padding: 8px 16px;
+  background: #238636;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.header .refresh-btn:hover { background: #2ea043; }
+.header .refresh-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.status { font-size: 12px; color: #8b949e; }
+
+.commit-list { display: flex; flex-direction: column; gap: 8px; }
+
+.commit {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.commit-header {
+  padding: 12px 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  transition: background 0.15s;
+}
+.commit-header:hover { background: #1f2428; }
+.commit-toggle {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #8b949e;
+  transition: transform 0.2s;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.commit.expanded .commit-toggle { transform: rotate(90deg); }
+.commit-info { flex: 1; min-width: 0; }
+.commit-message {
+  font-weight: 500;
+  color: #c9d1d9;
+  margin-bottom: 4px;
+  word-break: break-word;
+}
+.commit-meta {
+  font-size: 12px;
+  color: #8b949e;
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.commit-hash {
+  font-family: 'Monaco', 'Menlo', monospace;
+  font-size: 12px;
+  color: #58a6ff;
+  background: #388bfd1a;
+  padding: 2px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.commit-body {
+  display: none;
+  border-top: 1px solid #30363d;
+}
+.commit.expanded .commit-body { display: block; }
+
+.file-list {
+  padding: 12px 16px;
+  background: #0d1117;
+}
+.file-list-header {
+  font-size: 12px;
+  color: #8b949e;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.file-item {
+  padding: 8px 12px;
+  margin: 4px 0;
+  background: #161b22;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: 'Monaco', 'Menlo', monospace;
+  font-size: 13px;
+  transition: background 0.15s;
+}
+.file-item:hover { background: #1f2428; }
+.file-item.selected { background: #388bfd33; border: 1px solid #388bfd; }
+.file-status {
+  width: 20px;
+  text-align: center;
+  font-weight: 600;
+  font-size: 11px;
+}
+.file-status.added { color: #3fb950; }
+.file-status.modified { color: #d29922; }
+.file-status.deleted { color: #f85149; }
+.file-status.renamed { color: #a371f7; }
+.file-name { flex: 1; color: #c9d1d9; word-break: break-all; }
+
+.diff-panel {
+  border-top: 1px solid #30363d;
+  max-height: 400px;
+  overflow: auto;
+}
+.diff-header {
+  padding: 8px 16px;
+  background: #161b22;
+  font-size: 12px;
+  color: #8b949e;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  position: sticky;
+  top: 0;
+  border-bottom: 1px solid #30363d;
+}
+.diff-content {
+  padding: 0;
+  font-family: 'Monaco', 'Menlo', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.diff-line {
+  padding: 0 16px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.diff-line.addition { background: #2ea04326; color: #3fb950; }
+.diff-line.deletion { background: #f8514926; color: #f85149; }
+.diff-line.hunk { background: #388bfd26; color: #58a6ff; }
+
+.loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  color: #8b949e;
+  font-size: 13px;
+}
+.spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid #30363d;
+  border-top-color: #58a6ff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.empty-state {
+  padding: 40px;
+  text-align: center;
+  color: #8b949e;
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>Git Commit Explorer</h1>
+    <span id="status" class="status"></span>
+    <button id="refresh-btn" class="refresh-btn">Refresh</button>
+  </div>
+  <div id="commit-list" class="commit-list"></div>
+</div>
+
+<script type="module">
+// MCP Apps compatibility layer
+// Supports both window.mcpApps (obsidian-gemini-helper) and @anthropic-ai/mcp-app-sdk
+let mcpClient = null;
+
+async function initMcpClient() {
+  // Check for injected bridge first (obsidian-gemini-helper)
+  if (window.mcpApps && typeof window.mcpApps.callTool === 'function') {
+    return {
+      callServerTool: (name, args) => window.mcpApps.callTool(name, args),
+      type: 'bridge'
+    };
+  }
+
+  // Fall back to MCP App SDK
+  try {
+    const { App } = await import('https://esm.sh/@anthropic-ai/mcp-app-sdk@0.1');
+    const app = new App({ name: 'Git Commit Explorer', version: '1.0.0' });
+    await app.connect();
+    return {
+      callServerTool: (name, args) => app.callServerTool(name, args),
+      type: 'sdk'
+    };
+  } catch (e) {
+    console.log('MCP App SDK not available:', e.message);
+    return null;
+  }
+}
+let commits = [];
+let expandedCommit = null;
+let selectedFile = null;
+let filesCache = {};
+let diffCache = {};
+
+function parseCommits(input) {
+  let lines;
+  if (Array.isArray(input)) {
+    lines = input.filter(l => l && l.trim());
+  } else {
+    lines = (input || '').trim().split('\n').filter(l => l.trim());
+  }
+  return lines.map(line => {
+    const [hash, shortHash, author, date, ...messageParts] = line.split('|');
+    return {
+      hash: hash || '',
+      shortHash: shortHash || '',
+      author: author || '',
+      date: date || '',
+      message: messageParts.join('|') || ''
+    };
+  }).filter(c => c.hash);
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function parseFileStatus(status) {
+  const map = {
+    'A': { class: 'added', label: 'A' },
+    'M': { class: 'modified', label: 'M' },
+    'D': { class: 'deleted', label: 'D' },
+    'R': { class: 'renamed', label: 'R' },
+    'C': { class: 'modified', label: 'C' },
+    'T': { class: 'modified', label: 'T' }
+  };
+  return map[status[0]] || { class: 'modified', label: status[0] };
+}
+
+function parseFiles(output) {
+  const lines = output.trim().split('\n').filter(l => l.trim());
+  return lines.map(line => {
+    const [status, ...pathParts] = line.split('\t');
+    return {
+      status: status || 'M',
+      path: pathParts.join('\t') || ''
+    };
+  }).filter(f => f.path);
+}
+
+function renderDiff(diff) {
+  const lines = diff.split('\n');
+  return lines.map(line => {
+    let cls = '';
+    if (line.startsWith('+') && !line.startsWith('+++')) cls = 'addition';
+    else if (line.startsWith('-') && !line.startsWith('---')) cls = 'deletion';
+    else if (line.startsWith('@@')) cls = 'hunk';
+    return '<div class="diff-line ' + cls + '">' + escapeHtml(line) + '</div>';
+  }).join('');
+}
+
+function renderCommits() {
+  const container = document.getElementById('commit-list');
+
+  if (commits.length === 0) {
+    container.innerHTML = '<div class="empty-state">No commits found</div>';
+    return;
+  }
+
+  container.innerHTML = commits.map((commit, i) => `
+    <div class="commit${expandedCommit === i ? ' expanded' : ''}" data-index="${i}">
+      <div class="commit-header" data-action="toggle" data-index="${i}">
+        <div class="commit-toggle">&#9654;</div>
+        <div class="commit-info">
+          <div class="commit-message">${escapeHtml(commit.message)}</div>
+          <div class="commit-meta">
+            <span>${escapeHtml(commit.author)}</span>
+            <span>${escapeHtml(commit.date)}</span>
+          </div>
+        </div>
+        <div class="commit-hash">${escapeHtml(commit.shortHash)}</div>
+      </div>
+      <div class="commit-body" id="commit-body-${i}">
+        <div class="loading"><div class="spinner"></div>Loading files...</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function toggleCommit(index) {
+  if (expandedCommit === index) {
+    expandedCommit = null;
+    selectedFile = null;
+    renderCommits();
+    return;
+  }
+
+  expandedCommit = index;
+  selectedFile = null;
+  renderCommits();
+
+  const commit = commits[index];
+  const body = document.getElementById('commit-body-' + index);
+
+  if (filesCache[commit.hash]) {
+    renderFiles(index, filesCache[commit.hash]);
+    return;
+  }
+
+  if (!mcpClient) {
+    body.innerHTML = '<div class="loading">Not connected to MCP server</div>';
+    return;
+  }
+
+  try {
+    const result = await mcpClient.callServerTool('git-commit-files', { args: [commit.hash] });
+    if (result?.content?.[0]?.text) {
+      const files = parseFiles(result.content[0].text);
+      filesCache[commit.hash] = files;
+      renderFiles(index, files);
+    } else {
+      body.innerHTML = '<div class="loading">No files changed</div>';
+    }
+  } catch (e) {
+    body.innerHTML = '<div class="loading">Error: ' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+function renderFiles(commitIndex, files) {
+  const body = document.getElementById('commit-body-' + commitIndex);
+  const commit = commits[commitIndex];
+
+  let html = `
+    <div class="file-list">
+      <div class="file-list-header">${files.length} file${files.length !== 1 ? 's' : ''} changed</div>
+      ${files.map((file, i) => {
+        const status = parseFileStatus(file.status);
+        return `
+          <div class="file-item${selectedFile === i ? ' selected' : ''}"
+               data-action="select-file"
+               data-commit="${commitIndex}"
+               data-file="${i}">
+            <span class="file-status ${status.class}">${status.label}</span>
+            <span class="file-name">${escapeHtml(file.path)}</span>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+
+  if (selectedFile !== null && files[selectedFile]) {
+    const file = files[selectedFile];
+    const cacheKey = commit.hash + ':' + file.path;
+
+    if (diffCache[cacheKey]) {
+      html += `
+        <div class="diff-panel">
+          <div class="diff-header">
+            <span>${escapeHtml(file.path)}</span>
+          </div>
+          <div class="diff-content">${renderDiff(diffCache[cacheKey])}</div>
+        </div>
+      `;
+    } else {
+      html += `
+        <div class="diff-panel">
+          <div class="diff-header">
+            <span>${escapeHtml(file.path)}</span>
+          </div>
+          <div class="loading"><div class="spinner"></div>Loading diff...</div>
+        </div>
+      `;
+    }
+  }
+
+  body.innerHTML = html;
+}
+
+async function selectFile(commitIndex, fileIndex) {
+  if (selectedFile === fileIndex) {
+    selectedFile = null;
+    renderFiles(commitIndex, filesCache[commits[commitIndex].hash]);
+    return;
+  }
+
+  selectedFile = fileIndex;
+  const commit = commits[commitIndex];
+  const files = filesCache[commit.hash];
+  const file = files[fileIndex];
+  const cacheKey = commit.hash + ':' + file.path;
+
+  renderFiles(commitIndex, files);
+
+  if (diffCache[cacheKey]) {
+    return;
+  }
+
+  if (!mcpClient) {
+    return;
+  }
+
+  try {
+    const result = await mcpClient.callServerTool('git-file-diff', {
+      args: [commit.hash + ' -- ' + file.path]
+    });
+    if (result?.content?.[0]?.text) {
+      diffCache[cacheKey] = result.content[0].text;
+      renderFiles(commitIndex, files);
+    }
+  } catch (e) {
+    console.error('Failed to load diff:', e);
+  }
+}
+
+async function refresh() {
+  const btn = document.getElementById('refresh-btn');
+  btn.disabled = true;
+  setStatus('Refreshing...');
+
+  filesCache = {};
+  diffCache = {};
+  expandedCommit = null;
+  selectedFile = null;
+
+  try {
+    const result = await mcpClient.callServerTool('git-commits', {});
+    if (result?.content?.[0]?.text) {
+      commits = parseCommits(result.content[0].text);
+      renderCommits();
+      setStatus(commits.length + ' commits');
+    }
+  } catch (e) {
+    setStatus('Error: ' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function setStatus(msg) {
+  document.getElementById('status').textContent = msg;
+}
+
+// Event delegation
+document.getElementById('commit-list').addEventListener('click', (e) => {
+  const toggle = e.target.closest('[data-action="toggle"]');
+  if (toggle) {
+    toggleCommit(parseInt(toggle.dataset.index, 10));
+    return;
+  }
+
+  const fileItem = e.target.closest('[data-action="select-file"]');
+  if (fileItem) {
+    selectFile(
+      parseInt(fileItem.dataset.commit, 10),
+      parseInt(fileItem.dataset.file, 10)
+    );
+  }
+});
+
+document.getElementById('refresh-btn').addEventListener('click', refresh);
+
+// Initialize
+async function init() {
+  // Parse initial data
+  let initialLines = {{json .Lines}};
+  // Handle case where data comes as JSON string (via iframe bridge)
+  if (typeof initialLines === 'string') {
+    try {
+      initialLines = JSON.parse(initialLines);
+    } catch (e) {
+      initialLines = initialLines.split('\n');
+    }
+  }
+  commits = parseCommits(initialLines);
+  renderCommits();
+  setStatus(commits.length + ' commits');
+
+  mcpClient = await initMcpClient();
+  if (mcpClient) {
+    setStatus(commits.length + ' commits - Connected (' + mcpClient.type + ')');
+  } else {
+    setStatus(commits.length + ' commits - Standalone mode');
+  }
+}
+
+init();
+</script>
+</body>
+</html>

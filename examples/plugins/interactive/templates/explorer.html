@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>File Explorer</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #f5f5f5;
+  min-height: 100vh;
+}
+.container {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 20px;
+}
+.toolbar {
+  background: white;
+  border-radius: 8px 8px 0 0;
+  padding: 12px 16px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+.toolbar button {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: #e0e0e0;
+  color: #333;
+}
+.toolbar button:hover { background: #d0d0d0; }
+.toolbar button.primary { background: #4CAF50; color: white; }
+.toolbar button.primary:hover { background: #45a049; }
+.toolbar button:disabled { opacity: 0.5; cursor: not-allowed; }
+.breadcrumb {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 14px;
+  color: #666;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.breadcrumb-item { cursor: pointer; color: #2196F3; }
+.breadcrumb-item:hover { text-decoration: underline; }
+.breadcrumb .separator { color: #999; cursor: default; }
+.status { font-size: 12px; color: #888; }
+.file-list {
+  background: white;
+  border-radius: 0 0 8px 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  overflow: hidden;
+}
+.file-item {
+  display: flex;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid #f0f0f0;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.file-item:hover { background: #f8f9fa; }
+.file-item:last-child { border-bottom: none; }
+.file-icon {
+  width: 32px;
+  height: 32px;
+  margin-right: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+}
+.file-info { flex: 1; }
+.file-name { font-weight: 500; color: #333; }
+.file-meta { font-size: 12px; color: #888; margin-top: 2px; }
+.file-size { width: 80px; text-align: right; font-size: 13px; color: #666; }
+.file-date { width: 150px; text-align: right; font-size: 13px; color: #888; }
+.directory .file-name { color: #2196F3; }
+.spinner {
+  width: 16px; height: 16px;
+  border: 2px solid #ccc;
+  border-top-color: #4CAF50;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(255,255,255,0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.loading-overlay.hidden { display: none; }
+.empty-state {
+  padding: 40px;
+  text-align: center;
+  color: #888;
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="toolbar">
+    <button id="back-btn" disabled>&#x2190; Back</button>
+    <button id="refresh-btn" class="primary">
+      <span id="refresh-icon">&#x21bb;</span> Refresh
+    </button>
+    <div class="breadcrumb" id="breadcrumb"></div>
+    <span id="status" class="status"></span>
+  </div>
+  <div class="file-list" id="file-list"></div>
+</div>
+
+<div id="loading" class="loading-overlay hidden">
+  <div class="spinner" style="width: 40px; height: 40px; border-width: 4px;"></div>
+</div>
+
+<script type="module">
+// MCP Apps compatibility layer
+// Supports both window.mcpApps (obsidian-gemini-helper) and @anthropic-ai/mcp-app-sdk
+let mcpClient = null;
+
+async function initMcpClient() {
+  // Check for injected bridge first (obsidian-gemini-helper)
+  if (window.mcpApps && typeof window.mcpApps.callTool === 'function') {
+    return {
+      callServerTool: (name, args) => window.mcpApps.callTool(name, args),
+      type: 'bridge'
+    };
+  }
+
+  // Fall back to MCP App SDK
+  try {
+    const { App } = await import('https://esm.sh/@anthropic-ai/mcp-app-sdk@0.1');
+    const app = new App({ name: 'File Explorer', version: '1.0.0' });
+    await app.connect();
+    return {
+      callServerTool: (name, args) => app.callServerTool(name, args),
+      type: 'sdk'
+    };
+  } catch (e) {
+    console.log('MCP App SDK not available:', e.message);
+    return null;
+  }
+}
+
+let currentPath = '.';
+let pathHistory = [];
+let filesData = []; // Store current files for event handling
+
+// Parse ls -la output
+function parseLsOutput(output) {
+  const lines = output.trim().split('\n');
+  const files = [];
+
+  for (const line of lines) {
+    // Skip total line and empty lines
+    if (line.startsWith('total') || !line.trim()) continue;
+
+    // Parse ls -la format: permissions links owner group size month day time/year name
+    const match = line.match(/^([drwxlst-]{10})\s+(\d+)\s+(\S+)\s+(\S+)\s+(\d+)\s+(\w+)\s+(\d+)\s+([\d:]+|\d{4})\s+(.+)$/);
+    if (!match) continue;
+
+    const [, permissions, , owner, group, size, month, day, timeOrYear, name] = match;
+
+    // Skip . and .. entries
+    if (name === '.' || name === '..') continue;
+
+    const isDir = permissions.startsWith('d');
+    const isLink = permissions.startsWith('l');
+
+    files.push({
+      name: name.split(' -> ')[0], // Handle symlinks
+      permissions,
+      owner,
+      group,
+      size: parseInt(size),
+      date: `${month} ${day} ${timeOrYear}`,
+      isDir,
+      isLink
+    });
+  }
+
+  // Sort: directories first, then by name
+  files.sort((a, b) => {
+    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  return files;
+}
+
+function formatSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+}
+
+function getIcon(file) {
+  if (file.isDir) return '&#128193;'; // Folder
+  if (file.isLink) return '&#128279;'; // Link
+  const ext = file.name.split('.').pop().toLowerCase();
+  const icons = {
+    'js': '&#128220;', 'ts': '&#128220;', 'go': '&#128220;', 'py': '&#128220;',
+    'html': '&#127760;', 'css': '&#127912;', 'json': '&#128196;',
+    'md': '&#128196;', 'txt': '&#128196;', 'log': '&#128196;',
+    'jpg': '&#128247;', 'png': '&#128247;', 'gif': '&#128247;', 'svg': '&#128247;',
+    'zip': '&#128230;', 'tar': '&#128230;', 'gz': '&#128230;',
+    'sh': '&#128187;', 'exe': '&#128187;',
+  };
+  return icons[ext] || '&#128196;';
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function renderFiles(files) {
+  filesData = files; // Store for event handling
+  const list = document.getElementById('file-list');
+
+  if (files.length === 0) {
+    list.innerHTML = '<div class="empty-state">This directory is empty</div>';
+    return;
+  }
+
+  list.innerHTML = files.map((file, index) => `
+    <div class="file-item ${file.isDir ? 'directory' : ''}" data-index="${index}">
+      <div class="file-icon">${getIcon(file)}</div>
+      <div class="file-info">
+        <div class="file-name">${escapeHtml(file.name)}</div>
+        <div class="file-meta">${escapeHtml(file.permissions)} &bull; ${escapeHtml(file.owner)}</div>
+      </div>
+      <div class="file-size">${file.isDir ? '-' : formatSize(file.size)}</div>
+      <div class="file-date">${escapeHtml(file.date)}</div>
+    </div>
+  `).join('');
+}
+
+function updateBreadcrumb() {
+  const bc = document.getElementById('breadcrumb');
+  // Always show relative paths from root-dir (.)
+  // currentPath is always relative: ".", "subdir", "subdir/nested", etc.
+  const parts = currentPath === '.' ? [] : currentPath.split('/').filter(Boolean);
+
+  bc.innerHTML = '';
+
+  // Always show root (.) as first item
+  const rootSpan = document.createElement('span');
+  rootSpan.className = 'breadcrumb-item';
+  rootSpan.textContent = '~';
+  rootSpan.dataset.path = '.';
+  bc.appendChild(rootSpan);
+
+  parts.forEach((part, i) => {
+    const sep = document.createElement('span');
+    sep.className = 'separator';
+    sep.textContent = '/';
+    bc.appendChild(sep);
+
+    const span = document.createElement('span');
+    span.className = 'breadcrumb-item';
+    span.textContent = part;
+    span.dataset.path = parts.slice(0, i + 1).join('/');
+    bc.appendChild(span);
+  });
+}
+
+function setStatus(msg) {
+  document.getElementById('status').textContent = msg;
+}
+
+function showLoading(show) {
+  document.getElementById('loading').classList.toggle('hidden', !show);
+}
+
+async function navigateTo(path, addToHistory = true) {
+  if (!mcpClient) {
+    setStatus('Not connected');
+    return;
+  }
+
+  // Sanitize path: always relative, no .. traversal
+  path = path.replace(/^\/+/, '').replace(/\.\.\/?/g, '');
+  if (!path) path = '.';
+
+  showLoading(true);
+  setStatus('Loading...');
+
+  try {
+    // Use list-dir tool which is app-only
+    const result = await mcpClient.callServerTool('list-dir', { args: [path] });
+
+    if (result.isError) {
+      setStatus('Error: ' + (result.content?.[0]?.text || 'Unknown error'));
+      showLoading(false);
+      return;
+    }
+
+    const output = result.content?.[0]?.text || '';
+    const files = parseLsOutput(output);
+
+    if (addToHistory && path !== currentPath) {
+      pathHistory.push(currentPath);
+    }
+    currentPath = path;
+
+    renderFiles(files);
+    updateBreadcrumb();
+    updateBackButton();
+    setStatus(`${files.length} items`);
+  } catch (e) {
+    setStatus('Error: ' + e.message);
+  } finally {
+    showLoading(false);
+  }
+}
+
+function updateBackButton() {
+  document.getElementById('back-btn').disabled = pathHistory.length === 0;
+}
+
+async function goBack() {
+  if (pathHistory.length === 0) return;
+  const prevPath = pathHistory.pop();
+  await navigateTo(prevPath, false); // Don't add to history when going back
+  updateBackButton();
+}
+
+async function refresh() {
+  await navigateTo(currentPath, false); // Don't add to history when refreshing
+}
+
+async function handleFileClick(index) {
+  const file = filesData[index];
+  if (!file) return;
+
+  if (file.isDir) {
+    // Always use relative paths - never absolute
+    let newPath = currentPath === '.' ? file.name : `${currentPath}/${file.name}`;
+    // Safety: remove any leading slashes or .. to stay within root-dir
+    newPath = newPath.replace(/^\/+/, '').replace(/\.\.\/?/g, '');
+    if (!newPath) newPath = '.';
+    await navigateTo(newPath);
+  } else {
+    setStatus(`Selected: ${file.name}`);
+  }
+}
+
+// Event delegation for file list clicks
+document.getElementById('file-list').addEventListener('click', (e) => {
+  const item = e.target.closest('.file-item');
+  if (item && item.dataset.index !== undefined) {
+    handleFileClick(parseInt(item.dataset.index, 10));
+  }
+});
+
+// Event delegation for breadcrumb clicks
+document.getElementById('breadcrumb').addEventListener('click', (e) => {
+  const item = e.target.closest('.breadcrumb-item');
+  if (item && item.dataset.path !== undefined) {
+    navigateTo(item.dataset.path);
+  }
+});
+
+// Button event listeners
+document.getElementById('back-btn').addEventListener('click', goBack);
+document.getElementById('refresh-btn').addEventListener('click', refresh);
+
+// Initialize
+async function init() {
+  // Parse initial data from template
+  const initialOutput = {{json .Output}};
+  const files = parseLsOutput(initialOutput);
+  renderFiles(files);
+  updateBreadcrumb();
+
+  mcpClient = await initMcpClient();
+  if (mcpClient) {
+    setStatus(`${files.length} items - Connected (${mcpClient.type})`);
+  } else {
+    setStatus('Standalone mode');
+  }
+}
+
+init();
+</script>
+</body>
+</html>

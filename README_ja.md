@@ -27,11 +27,12 @@ AIアシスタント向けに、安全なシェルコマンド実行とHTTPプ�
 │  │  許可する環境変数: ["PATH", "HOME", "LANG", "GIT_*"]                │   │
 │  │                                                                     │   │
 │  │  ┌─────────────────────────────────────────────────────────────┐   │   │
-│  │  │  ツール: "git-log"                                          │   │   │
+│  │  │  ツール: "git-status"                                       │   │   │
 │  │  │  ├─ コマンド: git                                           │   │   │
-│  │  │  ├─ 許可する引数: ["log --oneline *", "log -n *"]           │   │   │
+│  │  │  ├─ 引数プレフィックス: ["status"]                          │   │   │
+│  │  │  ├─ 許可する引数: ["", "--short"]                           │   │   │
 │  │  │  ├─ サンドボックス: none                                    │   │   │
-│  │  │  └─ UIテンプレート: templates/log.html                      │   │   │
+│  │  │  └─ UIタイプ: log                                           │   │   │
 │  │  └─────────────────────────────────────────────────────────────┘   │   │
 │  │                                                                     │   │
 │  │  ┌─────────────────────────────────────────────────────────────┐   │   │
@@ -115,18 +116,20 @@ my-plugin/
 {
   "tools": [
     {
-      "name": "git-log",
-      "description": "Gitコミットログを表示",
+      "name": "git-status",
+      "description": "Gitリポジトリのステータスを表示",
       "command": "git",
-      "allowed_arg_globs": ["log --oneline *", "log --oneline"],
+      "args_prefix": ["status"],
+      "allowed_arg_globs": ["", "--short", "--branch"],
       "sandbox": "none",
-      "ui_template": "templates/log.html"
+      "ui_type": "log"
     },
     {
       "name": "ls",
       "description": "ディレクトリ内容を表示",
       "command": "ls",
-      "allowed_arg_globs": ["*"],
+      "args_prefix": ["-la"],
+      "allowed_arg_globs": ["", "**"],
       "sandbox": "bubblewrap",
       "ui_type": "log"
     }
@@ -134,6 +137,8 @@ my-plugin/
   "allowed_env_keys": ["PATH", "HOME", "LANG"]
 }
 ```
+
+**注意**: `args_prefix` は自動的に先頭に付加される固定引数です。`args_prefix: ["-la"]` の場合、`ls` を `args: ["/tmp"]` で呼び出すと `ls -la /tmp` が実行されます。`allowed_arg_globs` はユーザー指定の引数のみを検証します（プレフィックスは対象外）。
 
 ### 2. サーバー起動
 
@@ -221,6 +226,7 @@ plugins/
       "name": "ツール名",
       "description": "ツールの説明",
       "command": "/path/to/executable",
+      "args_prefix": ["サブコマンド"],
       "allowed_arg_globs": ["パターン1", "パターン2"],
       "sandbox": "none|bubblewrap|wasm",
       "wasm_binary": "/path/to/binary.wasm",
@@ -237,7 +243,8 @@ plugins/
 | `name` | Yes | 一意のツール名 |
 | `description` | No | ツールの説明 |
 | `command` | Yes* | 実行ファイルのパス（*wasmでは不要） |
-| `allowed_arg_globs` | No | 許可する引数のGlobパターン |
+| `args_prefix` | No | ユーザー引数の前に付加される固定引数（例: `["-la"]`） |
+| `allowed_arg_globs` | No | 許可するユーザー引数のGlobパターン（args_prefix適用前に評価） |
 | `sandbox` | No | `none`, `bubblewrap`, `wasm`（デフォルト: `none`） |
 | `wasm_binary` | Yes* | WASMバイナリのパス（*sandbox=wasmの場合必須） |
 | `ui_type` | No | 組み込みUI: `table`, `json`, `log` |
@@ -365,6 +372,7 @@ GOOS=wasip1 GOARCH=wasm go build -o tool.wasm main.go
 
 | パターン | 説明 |
 |---------|------|
+| `""` | **空文字列 - 引数なしでの呼び出しを許可** |
 | `*` | `/` 以外の任意文字列 |
 | `**` | `/` を含む任意文字列 |
 | `?` | 任意の1文字 |
@@ -372,9 +380,13 @@ GOOS=wasip1 GOARCH=wasm go build -o tool.wasm main.go
 | `{a,b}` | 選択 |
 
 例：
-- `status **` - `status`, `status .`, `status --short` にマッチ
+- `[""]` - 引数なしのみ許可（例: `git status` を引数なしで実行）
+- `["", "--short"]` - 引数なし、または `--short` を許可
+- `["**"]` - 全ての引数を許可（`allowed_arg_globs` 省略と同等）
 - `*.txt` - 任意の `.txt` ファイルにマッチ
 - `--format=*` - 任意の `--format=` オプションにマッチ
+
+> **重要**: 引数なしでツールを呼び出せるようにするには、`allowed_arg_globs` に `""` を含める必要があります。`""` がないと、最低1つの引数が必須になります。
 
 ## MCP Apps UI対応
 
@@ -395,7 +407,8 @@ GOOS=wasip1 GOARCH=wasm go build -o tool.wasm main.go
   "name": "git-status",
   "description": "Gitステータスを表示",
   "command": "git",
-  "allowed_arg_globs": ["status", "status *"],
+  "args_prefix": ["status"],
+  "allowed_arg_globs": ["", "*"],
   "sandbox": "none",
   "ui_type": "log"
 }
@@ -406,6 +419,54 @@ GOOS=wasip1 GOARCH=wasm go build -o tool.wasm main.go
 | `ui_type` | `table`, `json`, `log` |
 | `output_format` | `json`, `csv`, `lines`（テーブル解析用） |
 | `ui_template` | カスタムHTMLテンプレートのパス（ui_typeより優先） |
+| `ui_config` | 詳細なUI設定（下記参照） |
+
+### UI設定
+
+`ui_config` フィールドでUIの動作を細かく制御できます：
+
+```json
+{
+  "name": "file-explorer",
+  "description": "インタラクティブなファイルエクスプローラー",
+  "command": "ls",
+  "args_prefix": ["-la"],
+  "allowed_arg_globs": ["", "**"],
+  "sandbox": "none",
+  "ui_template": "templates/explorer.html",
+  "ui_config": {
+    "csp": {
+      "resource_domains": ["esm.sh"]
+    },
+    "visibility": ["model", "app"]
+  }
+}
+```
+
+| フィールド | 説明 |
+|-----------|------|
+| `csp.resource_domains` | CSPで許可する外部ドメイン（例: MCP App SDK用CDN） |
+| `visibility` | ツールの公開範囲: `["model", "app"]`（デフォルト）または `["app"]`（アプリ専用） |
+
+### アプリ専用ツール
+
+`visibility: ["app"]` のツールはモデルからは見えませんが、UIからMCP Apps SDK経由で呼び出すことができます。メインUIが動的に呼び出すヘルパーツールに便利です：
+
+```json
+{
+  "name": "git-staged-diff",
+  "description": "ファイルのステージ済みdiffを取得（アプリ専用）",
+  "command": "git",
+  "args_prefix": ["diff", "--cached", "--"],
+  "allowed_arg_globs": ["**"],
+  "sandbox": "none",
+  "ui_config": {
+    "visibility": ["app"]
+  }
+}
+```
+
+**注意**: `/` を含むパスをマッチさせる場合は `allowed_arg_globs` で `**`（`*` ではなく）を使用してください。
 
 ### カスタムテンプレート
 
@@ -413,22 +474,23 @@ Goテンプレートで完全にカスタムなUIを作成できます：
 
 ```json
 {
-  "name": "git-log",
-  "command": "git",
-  "ui_template": "templates/log.html"
+  "name": "process-list",
+  "command": "ps",
+  "args_prefix": ["aux"],
+  "ui_template": "templates/process.html"
 }
 ```
 
 テンプレート変数：
 - `{{.Output}}` - 生の出力文字列
-- `{{.Lines}}` - 行ごとに分割された出力
+- `{{.Lines}}` - 行ごとに分割された出力（配列）
 - `{{.JSON}}` - パース済みJSON（有効な場合）
 - `{{.JSONPretty}}` - 整形済みJSON
 - `{{.IsJSON}}` - 出力が有効なJSONかどうか
 
 テンプレート関数：
 - `{{escape .Output}}` - HTMLエスケープ
-- `{{json .Data}}` - JSONエンコード
+- `{{json .Data}}` - JSONエンコード（安全な埋め込み用に `template.JS` を返す）
 - `{{jsonPretty .Data}}` - 整形済みJSONエンコード
 - `{{split .String " "}}` - 文字列を区切り文字で分割
 - `{{join .Array " "}}` - 配列を区切り文字で結合
@@ -442,21 +504,68 @@ Goテンプレートで完全にカスタムなUIを作成できます：
 ```html
 <!DOCTYPE html>
 <html>
-<head><title>Git Log</title></head>
+<head><title>Process List</title></head>
 <body>
-  <h1>コミット（{{len .Lines}}件）</h1>
+  <h1>プロセス（{{len .Lines}}件）</h1>
+  <table>
   {{range .Lines}}
   {{if trimSpace .}}
-  {{$parts := split . " "}}
-  <div class="commit">
-    <span class="hash">{{first $parts}}</span>
-    <span class="message">{{escape (join (slice $parts 1) " ")}}</span>
-  </div>
+  <tr><td>{{escape .}}</td></tr>
   {{end}}
   {{end}}
+  </table>
 </body>
 </html>
 ```
+
+### MCP Apps SDKを使ったインタラクティブテンプレート
+
+テンプレートでMCP Apps SDKを使用すると、UIから他のツールを動的に呼び出す双方向通信が可能です：
+
+```html
+<script type="module">
+// MCP Apps互換レイヤー
+// window.mcpApps（obsidian-gemini-helper）と@anthropic-ai/mcp-app-sdkの両方をサポート
+let mcpClient = null;
+
+async function initMcpClient() {
+  // まずインジェクトされたブリッジをチェック（obsidian-gemini-helper）
+  if (window.mcpApps && typeof window.mcpApps.callTool === 'function') {
+    return {
+      callServerTool: (name, args) => window.mcpApps.callTool(name, args),
+      type: 'bridge'
+    };
+  }
+
+  // MCP App SDKにフォールバック
+  try {
+    const { App } = await import('https://esm.sh/@anthropic-ai/mcp-app-sdk@0.1');
+    const app = new App({ name: 'My App', version: '1.0.0' });
+    await app.connect();
+    return {
+      callServerTool: (name, args) => app.callServerTool(name, args),
+      type: 'sdk'
+    };
+  } catch (e) {
+    console.log('MCP App SDK not available:', e.message);
+    return null;
+  }
+}
+
+// 初期化して使用
+mcpClient = await initMcpClient();
+if (mcpClient) {
+  // アプリ専用ツールを呼び出し
+  const result = await mcpClient.callServerTool('git-staged-diff', { args: ['file.txt'] });
+  console.log(result.content[0].text);
+}
+
+// テンプレートからの初期データ
+const initialData = {{json .Lines}};  // 安全なJS埋め込み
+</script>
+```
+
+**重要**: JavaScriptで `{{json .Lines}}` などのテンプレート関数を使用する場合、出力は自動的に安全な埋め込み形式になります（二重エスケープを防ぐため `template.JS` 型を返す）。
 
 ### 仕組み
 
@@ -471,19 +580,38 @@ Goテンプレートで完全にカスタムなUIを作成できます：
 ```
 examples/plugins/
 ├── git/
-│   ├── plugin.json      # Gitコマンド（status, log, diff, branch等）
+│   ├── plugin.json      # インタラクティブUI付きGitコマンド
 │   └── templates/
+│       ├── changes.html # インタラクティブなステージ/アンステージ変更ビューア
+│       ├── commits.html # インタラクティブなコミットエクスプローラー
 │       ├── log.html     # git log用カスタムUI
 │       └── diff.html    # git diff用カスタムUI
+├── interactive/
+│   ├── plugin.json      # 双方向MCP Apps対応ファイルエクスプローラー
+│   └── templates/
+│       └── explorer.html
 └── shell/
     ├── plugin.json      # シェルコマンド（ls, cat, find, grep）
     └── templates/
         └── table.html   # カスタムテーブルUI
 ```
 
-使用例：
+### インタラクティブGitプラグイン
+
+gitプラグインは双方向MCP Apps通信を実演しています：
+
+- **git-changes**: アコーディオンUIでステージ/アンステージファイルを表示。ファイルをクリックするとdiffを表示（アプリ専用ツール経由で動的に読み込み）。
+- **git-commits**: コミット履歴を閲覧。コミットをクリックすると変更ファイル一覧、ファイルをクリックするとdiffを表示。
+
+アプリ専用ヘルパーツール（`visibility: ["app"]`）：
+- `git-staged-files`, `git-unstaged-files`: UI用のファイル一覧
+- `git-staged-diff`, `git-unstaged-diff`: 選択ファイルのdiff取得
+- `git-commit-files`, `git-file-diff`: コミット詳細の取得
+
+インタラクティブサンプルを試すには：
 ```bash
-./mcp-gatekeeper --plugins-dir=examples/plugins --root-dir=. --addr=:8080
+cd /path/to/your/git/repo
+./mcp-gatekeeper --plugins-dir=examples/plugins --root-dir=.
 ```
 
 ## ライセンス
