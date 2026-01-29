@@ -108,7 +108,7 @@ func main() {
 			upstreamEnvVars = strings.Split(*upstreamEnv, ",")
 		}
 
-		if err := runBridge(*addr, *upstream, upstreamEnvVars, *apiKey, *rateLimit, *maxResponseSize, *debug, database, *enableOAuth, *oauthIssuer); err != nil {
+		if err := runBridge(*addr, *upstream, upstreamEnvVars, *apiKey, *rateLimit, *maxResponseSize, *debug, database, *enableOAuth, *oauthIssuer, *enableStreamable, *sessionTTL); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -326,7 +326,7 @@ func runHTTP(plugins *plugin.Config, addr string, rateLimit int, rootDir string,
 	return nil
 }
 
-func runBridge(addr string, upstream string, upstreamEnv []string, apiKey string, rateLimit int, maxResponseSize int, debug bool, database *db.DB, enableOAuth bool, oauthIssuer string) error {
+func runBridge(addr string, upstream string, upstreamEnv []string, apiKey string, rateLimit int, maxResponseSize int, debug bool, database *db.DB, enableOAuth bool, oauthIssuer string, enableStreamable bool, sessionTTL time.Duration) error {
 	// Parse upstream command with shell-like syntax support
 	parts, err := bridge.ParseCommand(upstream)
 	if err != nil {
@@ -337,18 +337,20 @@ func runBridge(addr string, upstream string, upstreamEnv []string, apiKey string
 	}
 
 	config := &bridge.ServerConfig{
-		Command:         parts[0],
-		Args:            parts[1:],
-		Env:             upstreamEnv,
-		APIKey:          apiKey,
-		Timeout:         30 * time.Second,
-		RateLimit:       rateLimit,
-		RateLimitWindow: time.Minute,
-		MaxResponseSize: maxResponseSize,
-		Debug:           debug,
-		DB:              database,
-		EnableOAuth:     enableOAuth,
-		OAuthIssuer:     oauthIssuer,
+		Command:          parts[0],
+		Args:             parts[1:],
+		Env:              upstreamEnv,
+		APIKey:           apiKey,
+		Timeout:          30 * time.Second,
+		RateLimit:        rateLimit,
+		RateLimitWindow:  time.Minute,
+		MaxResponseSize:  maxResponseSize,
+		Debug:            debug,
+		DB:               database,
+		EnableOAuth:      enableOAuth,
+		OAuthIssuer:      oauthIssuer,
+		EnableStreamable: enableStreamable,
+		SessionTTL:       sessionTTL,
 	}
 
 	server, err := bridge.NewServer(config)
@@ -391,6 +393,9 @@ func runBridge(addr string, upstream string, upstreamEnv []string, apiKey string
 	}
 	if apiKey != "" {
 		fmt.Printf("API key authentication enabled\n")
+	}
+	if enableStreamable {
+		fmt.Printf("MCP Streamable HTTP enabled (session TTL: %s, separate upstream per session)\n", sessionTTL)
 	}
 	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		return fmt.Errorf("HTTP server error: %w", err)

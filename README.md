@@ -92,6 +92,7 @@ A security-focused MCP (Model Context Protocol) gateway that enables AI assistan
 - **Flexible Sandboxing**: none, bubblewrap, or WASM isolation
 - **Policy-Based Access Control**: Glob patterns for argument validation
 - **OAuth 2.0 Authentication**: Client credentials flow for M2M communication
+- **MCP Streamable HTTP**: Session-based protocol with SSE streaming (2025-06-18)
 - **TUI Admin Tool**: Manage OAuth clients via terminal UI
 - **Optional Audit Logging**: SQLite-based logging for all modes
 - **Large Response Handling**: Automatic file externalization in bridge mode
@@ -303,6 +304,8 @@ Tool names must be unique across all plugins.
 | `--max-response-size` | `500000` | Max response size in bytes (bridge) |
 | `--debug` | `false` | Enable debug logging (bridge) |
 | `--wasm-dir` | - | Directory containing WASM binaries |
+| `--enable-streamable` | `false` | Enable MCP Streamable HTTP (2025-06-18) |
+| `--session-ttl` | `30m` | Session TTL for Streamable HTTP |
 
 ## Audit Logging
 
@@ -449,6 +452,76 @@ go install github.com/takeshy/mcp-gatekeeper/cmd/admin@latest
 | `d` | Delete client |
 | `Esc` | Go back |
 | `q` | Quit |
+
+## MCP Streamable HTTP
+
+MCP Gatekeeper supports the MCP Streamable HTTP transport (protocol version 2025-06-18), enabling session-based communication with SSE streaming.
+
+### Enable Streamable HTTP
+
+```bash
+# HTTP mode with Streamable HTTP
+./mcp-gatekeeper --mode=http \
+  --enable-streamable \
+  --session-ttl=30m \
+  --plugins-dir=plugins/ \
+  --root-dir=/path/to/root \
+  --addr=:8080
+
+# Bridge mode with Streamable HTTP (separate upstream per session)
+./mcp-gatekeeper --mode=bridge \
+  --enable-streamable \
+  --session-ttl=30m \
+  --upstream='npx @playwright/mcp --headless' \
+  --addr=:8080
+```
+
+### Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/mcp` | Send JSON-RPC requests/notifications |
+| GET | `/mcp` | Open SSE stream for server→client notifications |
+| DELETE | `/mcp` | Terminate session |
+
+### Protocol Flow
+
+```bash
+# 1. Initialize (creates session)
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
+
+# Response includes Mcp-Session-Id header
+# Mcp-Session-Id: 550e8400-e29b-41d4-a716-446655440000
+
+# 2. Subsequent requests include session ID
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -H "Mcp-Session-Id: 550e8400-e29b-41d4-a716-446655440000" \
+  -H "MCP-Protocol-Version: 2025-06-18" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+
+# 3. Open SSE stream for server notifications
+curl -N http://localhost:8080/mcp \
+  -H "Accept: text/event-stream" \
+  -H "Mcp-Session-Id: 550e8400-e29b-41d4-a716-446655440000" \
+  -H "MCP-Protocol-Version: 2025-06-18"
+
+# 4. Terminate session
+curl -X DELETE http://localhost:8080/mcp \
+  -H "Mcp-Session-Id: 550e8400-e29b-41d4-a716-446655440000"
+```
+
+### Bridge Mode with Streamable HTTP
+
+In bridge mode with `--enable-streamable`, each session creates its own upstream MCP server process. This provides complete isolation between sessions:
+
+- Each `initialize` request spawns a new upstream process
+- Session state is not shared between clients
+- Upstream processes are terminated when sessions expire or are deleted
 
 ## Bridge Mode Features
 

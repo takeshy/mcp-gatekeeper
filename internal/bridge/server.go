@@ -20,16 +20,18 @@ import (
 
 // Server implements an HTTP bridge to stdio MCP servers
 type Server struct {
-	client          *Client
-	router          chi.Router
-	apiKey          string
-	rateLimiter     *RateLimiter
-	maxResponseSize int
-	fileStore       *FileStore
-	debug           bool
-	db              *db.DB         // Optional database for audit logging
-	oauthHandler    *oauth.Handler // Optional OAuth handler
-	mu              sync.RWMutex
+	client            *Client
+	router            chi.Router
+	apiKey            string
+	rateLimiter       *RateLimiter
+	maxResponseSize   int
+	fileStore         *FileStore
+	debug             bool
+	db                *db.DB              // Optional database for audit logging
+	oauthHandler      *oauth.Handler      // Optional OAuth handler
+	streamableHandler *StreamableHandler  // Optional Streamable HTTP handler
+	clientConfig      *ClientConfig       // Config for creating upstream clients
+	mu                sync.RWMutex
 }
 
 // ServerConfig holds server configuration
@@ -45,11 +47,13 @@ type ServerConfig struct {
 	Timeout         time.Duration
 	RateLimit       int
 	RateLimitWindow time.Duration
-	MaxResponseSize int    // Max response size in bytes (default 500000)
-	Debug           bool   // Enable debug logging
-	DB              *db.DB // Optional database for audit logging
-	EnableOAuth     bool   // Enable OAuth authentication (requires DB)
-	OAuthIssuer     string // OAuth issuer URL (optional, auto-detected if empty)
+	MaxResponseSize int           // Max response size in bytes (default 500000)
+	Debug           bool          // Enable debug logging
+	DB              *db.DB        // Optional database for audit logging
+	EnableOAuth     bool          // Enable OAuth authentication (requires DB)
+	OAuthIssuer     string        // OAuth issuer URL (optional, auto-detected if empty)
+	EnableStreamable bool         // Enable MCP Streamable HTTP (2025-06-18)
+	SessionTTL       time.Duration // Session TTL for Streamable HTTP (default 30 minutes)
 }
 
 // RateLimiter implements a sliding window rate limiter using a ring buffer
@@ -143,18 +147,30 @@ func NewServer(config *ServerConfig) (*Server, error) {
 	}
 
 	s := &Server{
-		client:          NewClient(clientConfig),
 		apiKey:          config.APIKey,
 		rateLimiter:     NewRateLimiter(rateLimit, rateLimitWindow),
 		maxResponseSize: maxResponseSize,
 		fileStore:       fileStore,
 		debug:           config.Debug,
 		db:              config.DB,
+		clientConfig:    clientConfig,
 	}
 
 	// Initialize OAuth handler if enabled and DB is available
 	if config.EnableOAuth && config.DB != nil {
 		s.oauthHandler = oauth.NewHandler(config.DB, config.OAuthIssuer)
+	}
+
+	// Initialize Streamable HTTP handler if enabled
+	if config.EnableStreamable {
+		sessionTTL := config.SessionTTL
+		if sessionTTL <= 0 {
+			sessionTTL = 30 * time.Minute
+		}
+		s.streamableHandler = NewStreamableHandler(s, sessionTTL, clientConfig)
+	} else {
+		// Legacy mode: create single shared client
+		s.client = NewClient(clientConfig)
 	}
 
 	s.setupRoutes()
@@ -191,14 +207,30 @@ func (s *Server) setupRoutes() {
 			r.Use(s.authMiddleware)
 		}
 		r.Use(s.rateLimitMiddleware)
-		r.Post("/mcp", s.handleMCP)
+		if s.streamableHandler != nil {
+			// Streamable HTTP mode
+			r.Post("/mcp", s.streamableHandler.HandlePost)
+			r.Get("/mcp", s.streamableHandler.HandleGet)
+			r.Delete("/mcp", s.streamableHandler.HandleDelete)
+		} else {
+			// Legacy mode
+			r.Post("/mcp", s.handleMCP)
+		}
 	})
 
 	s.router = r
 }
 
-// Start initializes the upstream connection
+// Start initializes the upstream connection (for legacy mode)
 func (s *Server) Start(ctx context.Context) error {
+	// In Streamable mode, upstream clients are created per session
+	if s.streamableHandler != nil {
+		s.streamableHandler.StartCleanup(ctx)
+		fmt.Fprintf(os.Stderr, "[bridge] streamable mode enabled, sessions will create their own upstream\n")
+		return nil
+	}
+
+	// Legacy mode: start shared client
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -224,9 +256,17 @@ func (s *Server) Handler() http.Handler {
 
 // Close closes the bridge server
 func (s *Server) Close() error {
+	if s.streamableHandler != nil {
+		s.streamableHandler.Stop()
+		return nil
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.client.Close()
+	if s.client != nil {
+		return s.client.Close()
+	}
+	return nil
 }
 
 // authMiddleware handles API key and OAuth token authentication

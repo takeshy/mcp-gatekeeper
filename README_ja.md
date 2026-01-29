@@ -92,6 +92,7 @@ AIアシスタントが安全にシェルコマンドを実行できるように
 - **柔軟なサンドボックス**: none, bubblewrap, WASM分離
 - **ポリシーベースのアクセス制御**: Globパターンによる引数検証
 - **OAuth 2.0認証**: M2M通信向けクライアントクレデンシャルフロー
+- **MCP Streamable HTTP**: SSEストリーミング付きセッションベースプロトコル（2025-06-18）
 - **TUI管理ツール**: ターミナルUIでOAuthクライアントを管理
 - **オプションの監査ログ**: 全モード対応のSQLiteログ
 - **大容量レスポンス対応**: bridgeモードでの自動ファイル外部化
@@ -288,6 +289,8 @@ plugins/
 | `--max-response-size` | `500000` | 最大レスポンスサイズ（バイト、bridge） |
 | `--debug` | `false` | デバッグログ有効化（bridge） |
 | `--wasm-dir` | - | WASMバイナリ格納ディレクトリ |
+| `--enable-streamable` | `false` | MCP Streamable HTTP（2025-06-18）を有効化 |
+| `--session-ttl` | `30m` | Streamable HTTPのセッションTTL |
 
 ## 監査ログ
 
@@ -434,6 +437,76 @@ go install github.com/takeshy/mcp-gatekeeper/cmd/admin@latest
 | `d` | クライアント削除 |
 | `Esc` | 戻る |
 | `q` | 終了 |
+
+## MCP Streamable HTTP
+
+MCP GatekeeperはMCP Streamable HTTPトランスポート（プロトコルバージョン2025-06-18）をサポートしており、SSEストリーミング付きのセッションベース通信が可能です。
+
+### Streamable HTTPの有効化
+
+```bash
+# HTTPモードでStreamable HTTPを有効化
+./mcp-gatekeeper --mode=http \
+  --enable-streamable \
+  --session-ttl=30m \
+  --plugins-dir=plugins/ \
+  --root-dir=/path/to/root \
+  --addr=:8080
+
+# BridgeモードでStreamable HTTPを有効化（セッションごとに別々のupstream）
+./mcp-gatekeeper --mode=bridge \
+  --enable-streamable \
+  --session-ttl=30m \
+  --upstream='npx @playwright/mcp --headless' \
+  --addr=:8080
+```
+
+### エンドポイント
+
+| メソッド | エンドポイント | 説明 |
+|----------|---------------|------|
+| POST | `/mcp` | JSON-RPCリクエスト/通知を送信 |
+| GET | `/mcp` | サーバー→クライアント通知用SSEストリームを開く |
+| DELETE | `/mcp` | セッションを終了 |
+
+### プロトコルフロー
+
+```bash
+# 1. 初期化（セッション作成）
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
+
+# レスポンスにMcp-Session-Idヘッダーが含まれる
+# Mcp-Session-Id: 550e8400-e29b-41d4-a716-446655440000
+
+# 2. 後続リクエストにセッションIDを含める
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -H "Mcp-Session-Id: 550e8400-e29b-41d4-a716-446655440000" \
+  -H "MCP-Protocol-Version: 2025-06-18" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+
+# 3. サーバー通知用SSEストリームを開く
+curl -N http://localhost:8080/mcp \
+  -H "Accept: text/event-stream" \
+  -H "Mcp-Session-Id: 550e8400-e29b-41d4-a716-446655440000" \
+  -H "MCP-Protocol-Version: 2025-06-18"
+
+# 4. セッション終了
+curl -X DELETE http://localhost:8080/mcp \
+  -H "Mcp-Session-Id: 550e8400-e29b-41d4-a716-446655440000"
+```
+
+### BridgeモードでのStreamable HTTP
+
+`--enable-streamable`を指定したbridgeモードでは、各セッションが独自のupstream MCPサーバープロセスを作成します。これによりセッション間の完全な分離が実現されます：
+
+- 各`initialize`リクエストで新しいupstreamプロセスが起動
+- セッション状態はクライアント間で共有されない
+- セッションの期限切れまたは削除時にupstreamプロセスが終了
 
 ## Bridgeモードの機能
 
