@@ -71,6 +71,7 @@ type Tool struct {
 	AllowedArgGlobs []string    `json:"allowed_arg_globs"`
 	Sandbox         SandboxType `json:"sandbox"`
 	WasmBinary      string      `json:"wasm_binary"`
+	FixedCwd        bool        `json:"fixed_cwd,omitempty"` // If true, cwd is fixed to root directory and not exposed to clients
 	// UI settings (optional, for MCP Apps support)
 	UIType       UIType       `json:"ui_type,omitempty"`
 	OutputFormat OutputFormat `json:"output_format,omitempty"`

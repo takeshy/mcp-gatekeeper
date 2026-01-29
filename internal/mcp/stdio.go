@@ -202,12 +202,14 @@ func (s *StdioServer) handleToolsList(req *Request) (*Response, error) {
 			continue
 		}
 
-		// Build properties based on whether the tool accepts arguments
-		props := map[string]Property{
-			"cwd": {
+		// Build properties based on tool configuration
+		props := map[string]Property{}
+		// Only include cwd property if the tool allows changing working directory
+		if !t.FixedCwd {
+			props["cwd"] = Property{
 				Type:        "string",
 				Description: "Working directory for the command (defaults to root directory)",
-			},
+			}
 		}
 		// Only include args property if the tool accepts arguments
 		// A tool with allowed_arg_globs = [""] means it accepts no arguments

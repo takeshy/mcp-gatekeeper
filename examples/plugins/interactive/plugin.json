@@ -7,6 +7,7 @@
       "args_prefix": ["-la", "."],
       "allowed_arg_globs": [""],
       "sandbox": "none",
+      "fixed_cwd": true,
       "ui_template": "templates/explorer.html",
       "ui_config": {
         "csp": {
