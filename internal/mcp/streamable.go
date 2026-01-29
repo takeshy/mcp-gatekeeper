@@ -91,7 +91,7 @@ func (h *StreamableHandler) HandlePost(w http.ResponseWriter, r *http.Request) {
 
 	// Validate MCP-Protocol-Version header for non-initialize requests
 	protocolVersion := r.Header.Get(HeaderMCPProtocolVersion)
-	if protocolVersion != "" && protocolVersion != StreamableProtocolVersion {
+	if protocolVersion != "" && protocolVersion != StreamableProtocolVersion && protocolVersion != ProtocolVersion {
 		h.writeHTTPError(w, http.StatusBadRequest,
 			fmt.Sprintf("unsupported protocol version: expected %s, got %s", StreamableProtocolVersion, protocolVersion))
 		return
@@ -117,7 +117,7 @@ func (h *StreamableHandler) HandlePost(w http.ResponseWriter, r *http.Request) {
 	case "resources/list":
 		resp = h.httpServer.handleMCPResourcesList(&req)
 	case "resources/read":
-		resp = h.httpServer.handleMCPResourcesRead(&req)
+		resp = h.httpServer.handleMCPResourcesRead(&req, sess.ID)
 	case "ping":
 		resp = NewResponse(req.ID, struct{}{})
 	default:
@@ -136,7 +136,7 @@ func (h *StreamableHandler) handleInitialize(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Validate client protocol version
-	if params.ProtocolVersion != StreamableProtocolVersion {
+	if params.ProtocolVersion != StreamableProtocolVersion && params.ProtocolVersion != ProtocolVersion {
 		h.writeJSONRPC(w, nil, NewErrorResponse(req.ID, InvalidRequest, "Unsupported protocol version",
 			fmt.Sprintf("expected %s, got %s", StreamableProtocolVersion, params.ProtocolVersion)))
 		return
@@ -167,7 +167,7 @@ func (h *StreamableHandler) handleInitialize(w http.ResponseWriter, r *http.Requ
 	}
 
 	result := &InitializeResult{
-		ProtocolVersion: StreamableProtocolVersion,
+		ProtocolVersion: params.ProtocolVersion,
 		Capabilities:    caps,
 		ServerInfo: ServerInfo{
 			Name:    ServerName,

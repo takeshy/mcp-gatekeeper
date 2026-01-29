@@ -300,7 +300,7 @@ func (s *HTTPServer) handleMCP(w http.ResponseWriter, r *http.Request) {
 	case "resources/list":
 		resp = s.handleMCPResourcesList(&req)
 	case "resources/read":
-		resp = s.handleMCPResourcesRead(&req)
+		resp = s.handleMCPResourcesRead(&req, "") // No session ID in non-streamable mode
 	case "ping":
 		resp = NewResponse(req.ID, struct{}{})
 	default:
@@ -539,7 +539,9 @@ func (s *HTTPServer) handleMCPResourcesList(req *Request) *Response {
 	return NewResponse(req.ID, &ListResourcesResult{Resources: resources})
 }
 
-func (s *HTTPServer) handleMCPResourcesRead(req *Request) *Response {
+// handleMCPResourcesRead handles resources/read requests
+// sessionID is optional - empty string for non-streamable mode
+func (s *HTTPServer) handleMCPResourcesRead(req *Request, sessionID string) *Response {
 	var params ReadResourceParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		return NewErrorResponse(req.ID, InvalidParams, "Invalid params", err.Error())
@@ -579,8 +581,8 @@ func (s *HTTPServer) handleMCPResourcesRead(req *Request) *Response {
 		}
 	}
 
-	// Generate HTML
-	htmlContent, err := GenerateUIHTML(tool, encodedData)
+	// Generate HTML with session ID for streamable mode
+	htmlContent, err := GenerateUIHTML(tool, encodedData, sessionID)
 	if err != nil {
 		return NewErrorResponse(req.ID, InternalError, "Failed to generate UI", err.Error())
 	}

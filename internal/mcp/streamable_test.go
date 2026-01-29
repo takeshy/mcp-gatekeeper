@@ -665,7 +665,7 @@ func TestStreamableHandler_Initialize_UnsupportedProtocolVersion(t *testing.T) {
 		ID:      json.RawMessage(`1`),
 		Method:  "initialize",
 		Params: json.RawMessage(`{
-			"protocolVersion": "2024-11-05",
+			"protocolVersion": "1999-01-01",
 			"capabilities": {},
 			"clientInfo": {"name": "test", "version": "1.0"}
 		}`),
@@ -739,7 +739,7 @@ func TestStreamableHandler_WrongProtocolVersionHeader(t *testing.T) {
 	listReqHTTP.Header.Set("Content-Type", "application/json")
 	listReqHTTP.Header.Set("Accept", "application/json")
 	listReqHTTP.Header.Set(HeaderMcpSessionID, sessionID)
-	listReqHTTP.Header.Set(HeaderMCPProtocolVersion, "2024-11-05") // Wrong version
+	listReqHTTP.Header.Set(HeaderMCPProtocolVersion, "1999-01-01") // Wrong version
 
 	listW := httptest.NewRecorder()
 	handler.HandlePost(listW, listReqHTTP)

@@ -399,8 +399,8 @@ func (s *StdioServer) handleResourcesRead(req *Request) (*Response, error) {
 		}
 	}
 
-	// Generate HTML
-	htmlContent, err := GenerateUIHTML(tool, encodedData)
+	// Generate HTML (no session ID in stdio mode)
+	htmlContent, err := GenerateUIHTML(tool, encodedData, "")
 	if err != nil {
 		return NewErrorResponse(req.ID, InternalError, "Failed to generate UI", err.Error()), nil
 	}

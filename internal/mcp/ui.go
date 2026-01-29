@@ -118,7 +118,8 @@ func BuildResultMeta(tool *plugin.Tool, output string) map[string]interface{} {
 }
 
 // GenerateUIHTML generates HTML for a tool's UI based on its type and output
-func GenerateUIHTML(tool *plugin.Tool, encodedData string) (string, error) {
+// sessionID is the MCP Streamable HTTP session ID (empty if not using streamable)
+func GenerateUIHTML(tool *plugin.Tool, encodedData string, sessionID string) (string, error) {
 	// Decode the data
 	data, err := base64.URLEncoding.DecodeString(encodedData)
 	if err != nil {
@@ -128,16 +129,16 @@ func GenerateUIHTML(tool *plugin.Tool, encodedData string) (string, error) {
 
 	// If custom template is specified, use it
 	if tool.UITemplate != "" {
-		return generateCustomUI(tool.UITemplate, output)
+		return generateCustomUI(tool.UITemplate, output, sessionID)
 	}
 
 	switch tool.UIType {
 	case plugin.UITypeTable:
-		return generateTableUI(tool, output)
+		return generateTableUI(tool, output, sessionID)
 	case plugin.UITypeJSON:
-		return generateJSONUI(output)
+		return generateJSONUI(output, sessionID)
 	case plugin.UITypeLog:
-		return generateLogUI(output)
+		return generateLogUI(output, sessionID)
 	default:
 		return generateDefaultUI(output)
 	}
@@ -145,14 +146,15 @@ func GenerateUIHTML(tool *plugin.Tool, encodedData string) (string, error) {
 
 // TemplateData is passed to custom templates
 type TemplateData struct {
-	Output     string                 // Raw output string
-	Lines      []string               // Output split by lines
-	JSON       interface{}            // Parsed JSON (if valid)
-	JSONPretty string                 // Pretty-printed JSON (if valid)
-	IsJSON     bool                   // Whether output is valid JSON
+	Output     string      // Raw output string
+	Lines      []string    // Output split by lines
+	JSON       interface{} // Parsed JSON (if valid)
+	JSONPretty string      // Pretty-printed JSON (if valid)
+	IsJSON     bool        // Whether output is valid JSON
+	SessionID  string      // MCP Streamable HTTP session ID (empty if not using streamable)
 }
 
-func generateCustomUI(templatePath string, output string) (string, error) {
+func generateCustomUI(templatePath string, output string, sessionID string) (string, error) {
 	// Read template file
 	tmplContent, err := os.ReadFile(templatePath)
 	if err != nil {
@@ -184,7 +186,7 @@ func generateCustomUI(templatePath string, output string) (string, error) {
 			}
 			return s[0]
 		},
-		"contains": strings.Contains,
+		"contains":  strings.Contains,
 		"hasPrefix": strings.HasPrefix,
 		"trimSpace": strings.TrimSpace,
 	}).Parse(string(tmplContent))
@@ -194,8 +196,9 @@ func generateCustomUI(templatePath string, output string) (string, error) {
 
 	// Prepare template data
 	data := TemplateData{
-		Output: output,
-		Lines:  strings.Split(output, "\n"),
+		Output:    output,
+		Lines:     strings.Split(output, "\n"),
+		SessionID: sessionID,
 	}
 
 	// Try to parse as JSON
@@ -217,7 +220,7 @@ func generateCustomUI(templatePath string, output string) (string, error) {
 	return sb.String(), nil
 }
 
-func generateTableUI(tool *plugin.Tool, output string) (string, error) {
+func generateTableUI(tool *plugin.Tool, output string, sessionID string) (string, error) {
 	var rows [][]string
 	var headers []string
 
@@ -281,10 +284,10 @@ func generateTableUI(tool *plugin.Tool, output string) (string, error) {
 		return generateDefaultUI(output)
 	}
 
-	return buildTableHTML(headers, rows, string(tool.OutputFormat)), nil
+	return buildTableHTML(headers, rows, string(tool.OutputFormat), sessionID), nil
 }
 
-func buildTableHTML(headers []string, rows [][]string, outputFormat string) string {
+func buildTableHTML(headers []string, rows [][]string, outputFormat string, sessionID string) string {
 	var sb strings.Builder
 
 	sb.WriteString(`<!DOCTYPE html>
@@ -338,26 +341,57 @@ tr:hover td { background: #f8f9fa; }
 
 	sb.WriteString(fmt.Sprintf(`</tbody></table></div>
 <script type="module">
-import { App } from 'https://esm.sh/@anthropic-ai/mcp-app-sdk@0.1';
+const sessionId = %q;
+const outputFormat = %q;
 
-let app = null;
+// MCP Apps compatibility layer
+let mcpClient = null;
+
+async function initMcpClient() {
+  // Check for injected bridge first (obsidian-gemini-helper)
+  if (window.mcpApps && typeof window.mcpApps.callTool === 'function') {
+    const opts = sessionId ? { sessionId } : undefined;
+    return {
+      callServerTool: (name, args) => window.mcpApps.callTool(name, args, opts),
+      type: 'bridge'
+    };
+  }
+
+  // Fall back to MCP App SDK
+  try {
+    const { App } = await import('https://esm.sh/@anthropic-ai/mcp-app-sdk@0.1');
+    const app = new App({ name: 'Table UI', version: '1.0.0' });
+    await app.connect(sessionId ? { sessionId } : undefined);
+    return {
+      callServerTool: (name, args) => app.callServerTool(name, args),
+      context: app.context,
+      type: 'sdk'
+    };
+  } catch (e) {
+    console.log('MCP App SDK not available:', e.message);
+    return null;
+  }
+}
+
 let currentToolName = null;
 let currentArgs = {};
-const outputFormat = %q;
 
 async function initApp() {
   try {
-    app = new App({ name: 'Table UI', version: '1.0.0' });
-    await app.connect();
-
-    if (app.context?.toolName) {
-      currentToolName = app.context.toolName;
-      currentArgs = app.context.arguments || {};
+    mcpClient = await initMcpClient();
+    if (!mcpClient) {
+      setStatus('Standalone mode');
+      return;
     }
 
-    setStatus('Connected');
+    if (mcpClient.context?.toolName) {
+      currentToolName = mcpClient.context.toolName;
+      currentArgs = mcpClient.context.arguments || {};
+    }
+
+    setStatus('Connected (' + mcpClient.type + ')');
   } catch (e) {
-    console.log('MCP App SDK not available:', e.message);
+    console.log('Init error:', e.message);
     setStatus('Standalone mode');
   }
 }
@@ -432,7 +466,7 @@ function parseTable(text) {
 }
 
 async function refresh() {
-  if (!app || !currentToolName) {
+  if (!mcpClient || !currentToolName) {
     setStatus('Refresh not available');
     return;
   }
@@ -444,7 +478,7 @@ async function refresh() {
   setStatus('Refreshing...');
 
   try {
-    const result = await app.callServerTool(currentToolName, currentArgs);
+    const result = await mcpClient.callServerTool(currentToolName, currentArgs);
     if (result?.content?.[0]?.text) {
       updateTableFromText(result.content[0].text);
       setStatus('Updated at ' + new Date().toLocaleTimeString());
@@ -501,12 +535,12 @@ window.sortTable = function(col) {
 
 initApp();
 </script>
-</body></html>`, outputFormat))
+</body></html>`, sessionID, outputFormat))
 
 	return sb.String()
 }
 
-func generateJSONUI(output string) (string, error) {
+func generateJSONUI(output string, sessionID string) (string, error) {
 	// Pretty print JSON
 	var parsed interface{}
 	if err := json.Unmarshal([]byte(output), &parsed); err != nil {
@@ -555,26 +589,54 @@ pre { white-space: pre-wrap; word-wrap: break-word; line-height: 1.5; margin: 0;
 <pre id="json">%s</pre>
 </div>
 <script type="module">
-import { App } from 'https://esm.sh/@anthropic-ai/mcp-app-sdk@0.1';
+const sessionId = %q;
 
-let app = null;
+// MCP Apps compatibility layer
+let mcpClient = null;
+
+async function initMcpClient() {
+  if (window.mcpApps && typeof window.mcpApps.callTool === 'function') {
+    const opts = sessionId ? { sessionId } : undefined;
+    return {
+      callServerTool: (name, args) => window.mcpApps.callTool(name, args, opts),
+      type: 'bridge'
+    };
+  }
+  try {
+    const { App } = await import('https://esm.sh/@anthropic-ai/mcp-app-sdk@0.1');
+    const app = new App({ name: 'JSON UI', version: '1.0.0' });
+    await app.connect(sessionId ? { sessionId } : undefined);
+    return {
+      callServerTool: (name, args) => app.callServerTool(name, args),
+      context: app.context,
+      type: 'sdk'
+    };
+  } catch (e) {
+    console.log('MCP App SDK not available:', e.message);
+    return null;
+  }
+}
+
 let currentToolName = null;
 let currentArgs = {};
 let currentJSON = document.getElementById('json').textContent;
 
 async function initApp() {
   try {
-    app = new App({ name: 'JSON UI', version: '1.0.0' });
-    await app.connect();
-
-    if (app.context?.toolName) {
-      currentToolName = app.context.toolName;
-      currentArgs = app.context.arguments || {};
+    mcpClient = await initMcpClient();
+    if (!mcpClient) {
+      setStatus('Standalone mode');
+      return;
     }
 
-    setStatus('Connected');
+    if (mcpClient.context?.toolName) {
+      currentToolName = mcpClient.context.toolName;
+      currentArgs = mcpClient.context.arguments || {};
+    }
+
+    setStatus('Connected (' + mcpClient.type + ')');
   } catch (e) {
-    console.log('MCP App SDK not available:', e.message);
+    console.log('Init error:', e.message);
     setStatus('Standalone mode');
   }
 }
@@ -588,7 +650,7 @@ function escapeHtml(str) {
 }
 
 async function refresh() {
-  if (!app || !currentToolName) {
+  if (!mcpClient || !currentToolName) {
     setStatus('Refresh not available');
     return;
   }
@@ -600,7 +662,7 @@ async function refresh() {
   setStatus('Refreshing...');
 
   try {
-    const result = await app.callServerTool(currentToolName, currentArgs);
+    const result = await mcpClient.callServerTool(currentToolName, currentArgs);
     if (result?.content?.[0]?.text) {
       updateJSON(result.content[0].text);
       setStatus('Updated at ' + new Date().toLocaleTimeString());
@@ -660,10 +722,10 @@ function syntaxHighlight(json) {
 document.getElementById('json').innerHTML = syntaxHighlight(document.getElementById('json').textContent);
 initApp();
 </script>
-</body></html>`, html.EscapeString(string(prettyJSON))), nil
+</body></html>`, html.EscapeString(string(prettyJSON)), sessionID), nil
 }
 
-func generateLogUI(output string) (string, error) {
+func generateLogUI(output string, sessionID string) (string, error) {
 	lines := strings.Split(output, "\n")
 
 	var sb strings.Builder
@@ -723,28 +785,56 @@ body { font-family: 'Monaco', 'Menlo', monospace; font-size: 12px; background: #
 		sb.WriteString(fmt.Sprintf(`<div class="%s"><span class="line-num">%d</span>%s</div>`, cls, i+1, html.EscapeString(line)))
 	}
 
-	sb.WriteString(`</div>
+	sb.WriteString(fmt.Sprintf(`</div>
 <script type="module">
-import { App } from 'https://esm.sh/@anthropic-ai/mcp-app-sdk@0.1';
+const sessionId = %q;
 
-let app = null;
+// MCP Apps compatibility layer
+let mcpClient = null;
+
+async function initMcpClient() {
+  if (window.mcpApps && typeof window.mcpApps.callTool === 'function') {
+    const opts = sessionId ? { sessionId } : undefined;
+    return {
+      callServerTool: (name, args) => window.mcpApps.callTool(name, args, opts),
+      type: 'bridge'
+    };
+  }
+  try {
+    const { App } = await import('https://esm.sh/@anthropic-ai/mcp-app-sdk@0.1');
+    const app = new App({ name: 'Log UI', version: '1.0.0' });
+    await app.connect(sessionId ? { sessionId } : undefined);
+    return {
+      callServerTool: (name, args) => app.callServerTool(name, args),
+      context: app.context,
+      type: 'sdk'
+    };
+  } catch (e) {
+    console.log('MCP App SDK not available:', e.message);
+    return null;
+  }
+}
+
 let currentToolName = null;
 let currentArgs = {};
 let autoRefreshInterval = null;
 
 async function initApp() {
   try {
-    app = new App({ name: 'Log UI', version: '1.0.0' });
-    await app.connect();
-
-    if (app.context?.toolName) {
-      currentToolName = app.context.toolName;
-      currentArgs = app.context.arguments || {};
+    mcpClient = await initMcpClient();
+    if (!mcpClient) {
+      setStatus('Standalone mode');
+      return;
     }
 
-    setStatus('Connected');
+    if (mcpClient.context?.toolName) {
+      currentToolName = mcpClient.context.toolName;
+      currentArgs = mcpClient.context.arguments || {};
+    }
+
+    setStatus('Connected (' + mcpClient.type + ')');
   } catch (e) {
-    console.log('MCP App SDK not available:', e.message);
+    console.log('Init error:', e.message);
     setStatus('Standalone mode');
   }
 }
@@ -768,7 +858,7 @@ function getLineClass(line) {
 }
 
 async function refresh() {
-  if (!app || !currentToolName) {
+  if (!mcpClient || !currentToolName) {
     setStatus('Refresh not available');
     return;
   }
@@ -780,7 +870,7 @@ async function refresh() {
   setStatus('Refreshing...');
 
   try {
-    const result = await app.callServerTool(currentToolName, currentArgs);
+    const result = await mcpClient.callServerTool(currentToolName, currentArgs);
     if (result?.content?.[0]?.text) {
       updateLogs(result.content[0].text);
       setStatus('Updated at ' + new Date().toLocaleTimeString());
@@ -834,7 +924,7 @@ const filterLogs = window.filterLogs;
 
 initApp();
 </script>
-</body></html>`)
+</body></html>`, sessionID))
 
 	return sb.String(), nil
 }

@@ -128,6 +128,9 @@ body {
 </div>
 
 <script type="module">
+// Session ID for MCP Streamable HTTP (empty if not using streamable)
+const sessionId = {{json .SessionID}};
+
 // MCP Apps compatibility layer
 // Supports both window.mcpApps (obsidian-gemini-helper) and @anthropic-ai/mcp-app-sdk
 let mcpClient = null;
@@ -135,8 +138,9 @@ let mcpClient = null;
 async function initMcpClient() {
   // Check for injected bridge first (obsidian-gemini-helper)
   if (window.mcpApps && typeof window.mcpApps.callTool === 'function') {
+    const opts = sessionId ? { sessionId } : undefined;
     return {
-      callServerTool: (name, args) => window.mcpApps.callTool(name, args),
+      callServerTool: (name, args) => window.mcpApps.callTool(name, args, opts),
       type: 'bridge'
     };
   }
@@ -145,7 +149,7 @@ async function initMcpClient() {
   try {
     const { App } = await import('https://esm.sh/@anthropic-ai/mcp-app-sdk@0.1');
     const app = new App({ name: 'File Explorer', version: '1.0.0' });
-    await app.connect();
+    await app.connect(sessionId ? { sessionId } : undefined);
     return {
       callServerTool: (name, args) => app.callServerTool(name, args),
       type: 'sdk'
