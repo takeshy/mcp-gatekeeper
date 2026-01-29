@@ -35,9 +35,11 @@ func main() {
 		upstreamEnv     = flag.String("upstream-env", "", "Comma-separated environment variables for upstream server (e.g., 'KEY1=val1,KEY2=val2')")
 		maxResponseSize = flag.Int("max-response-size", 500000, "Max response size in bytes for bridge mode (default 500000)")
 		debug           = flag.Bool("debug", false, "Enable debug logging (logs request/response for bridge mode)")
-		dbPath          = flag.String("db", "", "SQLite database path for audit logging (optional)")
-		enableOAuth     = flag.Bool("enable-oauth", false, "Enable OAuth 2.0 authentication (requires --db)")
-		oauthIssuer     = flag.String("oauth-issuer", "", "OAuth issuer URL (optional, auto-detected if empty)")
+		dbPath           = flag.String("db", "", "SQLite database path for audit logging (optional)")
+		enableOAuth      = flag.Bool("enable-oauth", false, "Enable OAuth 2.0 authentication (requires --db)")
+		oauthIssuer      = flag.String("oauth-issuer", "", "OAuth issuer URL (optional, auto-detected if empty)")
+		enableStreamable = flag.Bool("enable-streamable", false, "Enable MCP Streamable HTTP (2025-06-18)")
+		sessionTTL       = flag.Duration("session-ttl", 30*time.Minute, "Session TTL for Streamable HTTP")
 	)
 	flag.Parse()
 
@@ -217,7 +219,7 @@ func main() {
 			os.Exit(1)
 		}
 	case "http":
-		if err := runHTTP(plugins, *addr, *rateLimit, rootDirAbs, wasmDirAbs, *apiKey, database, *enableOAuth, *oauthIssuer); err != nil {
+		if err := runHTTP(plugins, *addr, *rateLimit, rootDirAbs, wasmDirAbs, *apiKey, database, *enableOAuth, *oauthIssuer, *enableStreamable, *sessionTTL); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			if sandboxExecutor != nil {
 				sandboxExecutor.Cleanup()
@@ -260,20 +262,29 @@ func runStdio(plugins *plugin.Config, apiKey string, rootDir string, wasmDir str
 	return server.Run(ctx)
 }
 
-func runHTTP(plugins *plugin.Config, addr string, rateLimit int, rootDir string, wasmDir string, apiKey string, database *db.DB, enableOAuth bool, oauthIssuer string) error {
+func runHTTP(plugins *plugin.Config, addr string, rateLimit int, rootDir string, wasmDir string, apiKey string, database *db.DB, enableOAuth bool, oauthIssuer string, enableStreamable bool, sessionTTL time.Duration) error {
 	config := &mcp.HTTPConfig{
-		RateLimit:       rateLimit,
-		RateLimitWindow: time.Minute,
-		RootDir:         rootDir,
-		WasmDir:         wasmDir,
-		APIKey:          apiKey,
-		DB:              database,
-		EnableOAuth:     enableOAuth,
-		OAuthIssuer:     oauthIssuer,
+		RateLimit:        rateLimit,
+		RateLimitWindow:  time.Minute,
+		RootDir:          rootDir,
+		WasmDir:          wasmDir,
+		APIKey:           apiKey,
+		DB:               database,
+		EnableOAuth:      enableOAuth,
+		OAuthIssuer:      oauthIssuer,
+		EnableStreamable: enableStreamable,
+		SessionTTL:       sessionTTL,
 	}
 	server, err := mcp.NewHTTPServer(plugins, config)
 	if err != nil {
 		return fmt.Errorf("failed to create HTTP server: %w", err)
+	}
+
+	// Start streamable cleanup goroutine if enabled
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if server.IsStreamableEnabled() {
+		server.StartStreamableCleanup(ctx)
 	}
 
 	httpServer := &http.Server{
@@ -290,9 +301,11 @@ func runHTTP(plugins *plugin.Config, addr string, rateLimit int, rootDir string,
 
 	go func() {
 		<-sigCh
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		httpServer.Shutdown(ctx)
+		cancel() // Stop streamable cleanup
+		server.StopStreamable()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		httpServer.Shutdown(shutdownCtx)
 	}()
 
 	if wasmDir != "" {
@@ -302,6 +315,9 @@ func runHTTP(plugins *plugin.Config, addr string, rateLimit int, rootDir string,
 	}
 	if apiKey != "" {
 		fmt.Printf("API key authentication enabled\n")
+	}
+	if enableStreamable {
+		fmt.Printf("MCP Streamable HTTP enabled (session TTL: %s)\n", sessionTTL)
 	}
 	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		return fmt.Errorf("HTTP server error: %w", err)

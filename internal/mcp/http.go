@@ -65,27 +65,30 @@ func (r *RateLimiter) Allow() bool {
 
 // HTTPServer implements the HTTP API server
 type HTTPServer struct {
-	plugins        *plugin.Config
-	evaluator      *policy.Evaluator
-	executor       *executor.Executor
-	rateLimiter    *RateLimiter
-	router         chi.Router
-	rootDir        string
-	expectedAPIKey string         // Expected API key for authentication
-	db             *db.DB         // Optional database for audit logging
-	oauthHandler   *oauth.Handler // Optional OAuth handler
+	plugins           *plugin.Config
+	evaluator         *policy.Evaluator
+	executor          *executor.Executor
+	rateLimiter       *RateLimiter
+	router            chi.Router
+	rootDir           string
+	expectedAPIKey    string              // Expected API key for authentication
+	db                *db.DB              // Optional database for audit logging
+	oauthHandler      *oauth.Handler      // Optional OAuth handler
+	streamableHandler *StreamableHandler // Optional streamable HTTP handler
 }
 
 // HTTPConfig holds HTTP server configuration
 type HTTPConfig struct {
-	RateLimit       int
-	RateLimitWindow time.Duration
-	RootDir         string
-	WasmDir         string
-	APIKey          string // Expected API key for authentication (optional)
-	DB              *db.DB // Optional database for audit logging
-	EnableOAuth     bool   // Enable OAuth authentication (requires DB)
-	OAuthIssuer     string // OAuth issuer URL (optional, auto-detected if empty)
+	RateLimit        int
+	RateLimitWindow  time.Duration
+	RootDir          string
+	WasmDir          string
+	APIKey           string        // Expected API key for authentication (optional)
+	DB               *db.DB        // Optional database for audit logging
+	EnableOAuth      bool          // Enable OAuth authentication (requires DB)
+	OAuthIssuer      string        // OAuth issuer URL (optional, auto-detected if empty)
+	EnableStreamable bool          // Enable MCP Streamable HTTP (2025-06-18)
+	SessionTTL       time.Duration // Session TTL for Streamable HTTP (default 30 minutes)
 }
 
 // DefaultHTTPConfig returns the default HTTP configuration
@@ -93,6 +96,7 @@ func DefaultHTTPConfig() *HTTPConfig {
 	return &HTTPConfig{
 		RateLimit:       500,
 		RateLimitWindow: time.Minute,
+		SessionTTL:      30 * time.Minute,
 	}
 }
 
@@ -124,6 +128,15 @@ func NewHTTPServer(plugins *plugin.Config, config *HTTPConfig) (*HTTPServer, err
 		s.oauthHandler = oauth.NewHandler(config.DB, config.OAuthIssuer)
 	}
 
+	// Initialize Streamable HTTP handler if enabled
+	if config.EnableStreamable {
+		sessionTTL := config.SessionTTL
+		if sessionTTL <= 0 {
+			sessionTTL = 30 * time.Minute
+		}
+		s.streamableHandler = NewStreamableHandler(s, sessionTTL)
+	}
+
 	s.setupRoutes()
 	return s, nil
 }
@@ -147,7 +160,15 @@ func (s *HTTPServer) setupRoutes() {
 	// MCP JSON-RPC endpoint (with auth)
 	r.Group(func(r chi.Router) {
 		r.Use(s.authMiddleware)
-		r.Post("/mcp", s.handleMCP)
+		if s.streamableHandler != nil {
+			// Streamable HTTP mode: POST, GET, DELETE on /mcp
+			r.Post("/mcp", s.streamableHandler.HandlePost)
+			r.Get("/mcp", s.streamableHandler.HandleGet)
+			r.Delete("/mcp", s.streamableHandler.HandleDelete)
+		} else {
+			// Legacy mode: POST only
+			r.Post("/mcp", s.handleMCP)
+		}
 	})
 
 	s.router = r
@@ -156,6 +177,25 @@ func (s *HTTPServer) setupRoutes() {
 // Handler returns the HTTP handler
 func (s *HTTPServer) Handler() http.Handler {
 	return s.router
+}
+
+// StartStreamableCleanup starts the session cleanup goroutine for Streamable HTTP
+func (s *HTTPServer) StartStreamableCleanup(ctx context.Context) {
+	if s.streamableHandler != nil {
+		s.streamableHandler.StartCleanup(ctx)
+	}
+}
+
+// StopStreamable stops the streamable handler
+func (s *HTTPServer) StopStreamable() {
+	if s.streamableHandler != nil {
+		s.streamableHandler.Stop()
+	}
+}
+
+// IsStreamableEnabled returns whether Streamable HTTP is enabled
+func (s *HTTPServer) IsStreamableEnabled() bool {
+	return s.streamableHandler != nil
 }
 
 // authMiddleware handles API key and OAuth token authentication
