@@ -344,11 +344,11 @@ tr:hover td { background: #f8f9fa; }
 const sessionId = %q;
 const outputFormat = %q;
 
-// MCP Apps compatibility layer
+// MCP Apps: JSON-RPC over postMessage (per MCP Apps specification)
 let mcpClient = null;
 
-async function initMcpClient() {
-  // Check for injected bridge first (obsidian-gemini-helper)
+function initMcpClient() {
+  // Check for injected bridge first (legacy/custom hosts)
   if (window.mcpApps && typeof window.mcpApps.callTool === 'function') {
     const opts = sessionId ? { sessionId } : undefined;
     return {
@@ -357,20 +357,38 @@ async function initMcpClient() {
     };
   }
 
-  // Fall back to MCP App SDK
-  try {
-    const { App } = await import('https://esm.sh/@anthropic-ai/mcp-app-sdk@0.1');
-    const app = new App({ name: 'Table UI', version: '1.0.0' });
-    await app.connect(sessionId ? { sessionId } : undefined);
-    return {
-      callServerTool: (name, args) => app.callServerTool(name, args),
-      context: app.context,
-      type: 'sdk'
-    };
-  } catch (e) {
-    console.log('MCP App SDK not available:', e.message);
-    return null;
-  }
+  // MCP Apps standard: JSON-RPC over postMessage
+  let requestId = 0;
+  const pending = new Map();
+
+  window.addEventListener('message', (event) => {
+    const msg = event.data;
+    if (msg?.jsonrpc === '2.0' && msg.id !== undefined && pending.has(msg.id)) {
+      const { resolve, reject } = pending.get(msg.id);
+      pending.delete(msg.id);
+      if (msg.error) {
+        reject(new Error(msg.error.message));
+      } else {
+        resolve(msg.result);
+      }
+    }
+  });
+
+  return {
+    callServerTool: (name, args) => {
+      return new Promise((resolve, reject) => {
+        const id = ++requestId;
+        pending.set(id, { resolve, reject });
+        window.parent.postMessage({
+          jsonrpc: '2.0',
+          id,
+          method: 'tools/call',
+          params: { name, arguments: args }
+        }, '*');
+      });
+    },
+    type: 'postMessage'
+  };
 }
 
 let currentToolName = null;
@@ -378,7 +396,7 @@ let currentArgs = {};
 
 async function initApp() {
   try {
-    mcpClient = await initMcpClient();
+    mcpClient = initMcpClient();
     if (!mcpClient) {
       setStatus('Standalone mode');
       return;
@@ -591,10 +609,10 @@ pre { white-space: pre-wrap; word-wrap: break-word; line-height: 1.5; margin: 0;
 <script type="module">
 const sessionId = %q;
 
-// MCP Apps compatibility layer
+// MCP Apps: JSON-RPC over postMessage (per MCP Apps specification)
 let mcpClient = null;
 
-async function initMcpClient() {
+function initMcpClient() {
   if (window.mcpApps && typeof window.mcpApps.callTool === 'function') {
     const opts = sessionId ? { sessionId } : undefined;
     return {
@@ -602,19 +620,38 @@ async function initMcpClient() {
       type: 'bridge'
     };
   }
-  try {
-    const { App } = await import('https://esm.sh/@anthropic-ai/mcp-app-sdk@0.1');
-    const app = new App({ name: 'JSON UI', version: '1.0.0' });
-    await app.connect(sessionId ? { sessionId } : undefined);
-    return {
-      callServerTool: (name, args) => app.callServerTool(name, args),
-      context: app.context,
-      type: 'sdk'
-    };
-  } catch (e) {
-    console.log('MCP App SDK not available:', e.message);
-    return null;
-  }
+
+  let requestId = 0;
+  const pending = new Map();
+
+  window.addEventListener('message', (event) => {
+    const msg = event.data;
+    if (msg?.jsonrpc === '2.0' && msg.id !== undefined && pending.has(msg.id)) {
+      const { resolve, reject } = pending.get(msg.id);
+      pending.delete(msg.id);
+      if (msg.error) {
+        reject(new Error(msg.error.message));
+      } else {
+        resolve(msg.result);
+      }
+    }
+  });
+
+  return {
+    callServerTool: (name, args) => {
+      return new Promise((resolve, reject) => {
+        const id = ++requestId;
+        pending.set(id, { resolve, reject });
+        window.parent.postMessage({
+          jsonrpc: '2.0',
+          id,
+          method: 'tools/call',
+          params: { name, arguments: args }
+        }, '*');
+      });
+    },
+    type: 'postMessage'
+  };
 }
 
 let currentToolName = null;
@@ -623,7 +660,7 @@ let currentJSON = document.getElementById('json').textContent;
 
 async function initApp() {
   try {
-    mcpClient = await initMcpClient();
+    mcpClient = initMcpClient();
     if (!mcpClient) {
       setStatus('Standalone mode');
       return;
@@ -789,10 +826,10 @@ body { font-family: 'Monaco', 'Menlo', monospace; font-size: 12px; background: #
 <script type="module">
 const sessionId = %q;
 
-// MCP Apps compatibility layer
+// MCP Apps: JSON-RPC over postMessage (per MCP Apps specification)
 let mcpClient = null;
 
-async function initMcpClient() {
+function initMcpClient() {
   if (window.mcpApps && typeof window.mcpApps.callTool === 'function') {
     const opts = sessionId ? { sessionId } : undefined;
     return {
@@ -800,19 +837,38 @@ async function initMcpClient() {
       type: 'bridge'
     };
   }
-  try {
-    const { App } = await import('https://esm.sh/@anthropic-ai/mcp-app-sdk@0.1');
-    const app = new App({ name: 'Log UI', version: '1.0.0' });
-    await app.connect(sessionId ? { sessionId } : undefined);
-    return {
-      callServerTool: (name, args) => app.callServerTool(name, args),
-      context: app.context,
-      type: 'sdk'
-    };
-  } catch (e) {
-    console.log('MCP App SDK not available:', e.message);
-    return null;
-  }
+
+  let requestId = 0;
+  const pending = new Map();
+
+  window.addEventListener('message', (event) => {
+    const msg = event.data;
+    if (msg?.jsonrpc === '2.0' && msg.id !== undefined && pending.has(msg.id)) {
+      const { resolve, reject } = pending.get(msg.id);
+      pending.delete(msg.id);
+      if (msg.error) {
+        reject(new Error(msg.error.message));
+      } else {
+        resolve(msg.result);
+      }
+    }
+  });
+
+  return {
+    callServerTool: (name, args) => {
+      return new Promise((resolve, reject) => {
+        const id = ++requestId;
+        pending.set(id, { resolve, reject });
+        window.parent.postMessage({
+          jsonrpc: '2.0',
+          id,
+          method: 'tools/call',
+          params: { name, arguments: args }
+        }, '*');
+      });
+    },
+    type: 'postMessage'
+  };
 }
 
 let currentToolName = null;
@@ -821,7 +877,7 @@ let autoRefreshInterval = null;
 
 async function initApp() {
   try {
-    mcpClient = await initMcpClient();
+    mcpClient = initMcpClient();
     if (!mcpClient) {
       setStatus('Standalone mode');
       return;

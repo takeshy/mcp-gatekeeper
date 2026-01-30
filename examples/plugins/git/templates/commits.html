@@ -211,12 +211,11 @@ body {
 // Session ID for MCP Streamable HTTP (empty if not using streamable)
 const sessionId = {{json .SessionID}};
 
-// MCP Apps compatibility layer
-// Supports both window.mcpApps (obsidian-gemini-helper) and @anthropic-ai/mcp-app-sdk
+// MCP Apps: JSON-RPC over postMessage (per MCP Apps specification)
 let mcpClient = null;
 
-async function initMcpClient() {
-  // Check for injected bridge first (obsidian-gemini-helper)
+function initMcpClient() {
+  // Check for injected bridge first (legacy/custom hosts)
   if (window.mcpApps && typeof window.mcpApps.callTool === 'function') {
     const opts = sessionId ? { sessionId } : undefined;
     return {
@@ -225,19 +224,38 @@ async function initMcpClient() {
     };
   }
 
-  // Fall back to MCP App SDK
-  try {
-    const { App } = await import('https://esm.sh/@anthropic-ai/mcp-app-sdk@0.1');
-    const app = new App({ name: 'Git Commit Explorer', version: '1.0.0' });
-    await app.connect(sessionId ? { sessionId } : undefined);
-    return {
-      callServerTool: (name, args) => app.callServerTool(name, args),
-      type: 'sdk'
-    };
-  } catch (e) {
-    console.log('MCP App SDK not available:', e.message);
-    return null;
-  }
+  // MCP Apps standard: JSON-RPC over postMessage
+  let requestId = 0;
+  const pending = new Map();
+
+  window.addEventListener('message', (event) => {
+    const msg = event.data;
+    if (msg?.jsonrpc === '2.0' && msg.id !== undefined && pending.has(msg.id)) {
+      const { resolve, reject } = pending.get(msg.id);
+      pending.delete(msg.id);
+      if (msg.error) {
+        reject(new Error(msg.error.message));
+      } else {
+        resolve(msg.result);
+      }
+    }
+  });
+
+  return {
+    callServerTool: (name, args) => {
+      return new Promise((resolve, reject) => {
+        const id = ++requestId;
+        pending.set(id, { resolve, reject });
+        window.parent.postMessage({
+          jsonrpc: '2.0',
+          id,
+          method: 'tools/call',
+          params: { name, arguments: args }
+        }, '*');
+      });
+    },
+    type: 'postMessage'
+  };
 }
 let commits = [];
 let expandedCommit = null;
@@ -520,7 +538,7 @@ async function init() {
   renderCommits();
   setStatus(commits.length + ' commits');
 
-  mcpClient = await initMcpClient();
+  mcpClient = initMcpClient();
   if (mcpClient) {
     setStatus(commits.length + ' commits - Connected (' + mcpClient.type + ')');
   } else {
