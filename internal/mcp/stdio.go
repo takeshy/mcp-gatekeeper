@@ -20,7 +20,7 @@ import (
 const (
 	ProtocolVersion = "2024-11-05"
 	ServerName      = "mcp-gatekeeper"
-	ServerVersion   = "1.0.0"
+	ServerVersion   = "1.0.1"
 )
 
 // StdioServer implements the MCP server over stdio
