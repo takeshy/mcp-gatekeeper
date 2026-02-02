@@ -3,6 +3,7 @@
 [![Go](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-2025--11-green)](https://modelcontextprotocol.io/)
+[![DeepWiki](https://img.shields.io/badge/DeepWiki-takeshy%2Fmcp--gatekeeper-blue.svg?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IiNGRkZGRkYiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cGF0aCBkPSJNMTIgMmEzIDMgMCAwIDAgMCA2IDMgMyAwIDAgMCAwLTZ6Ii8+PHBhdGggZD0iTTE5IDlhNyA3IDAgMSAxLTE0IDBhNyA3IDAgMCAxIDE0IDB6Ii8+PHBhdGggZD0iTTE1LjkgMTcuNGMuNy43IDEuNyAxLjQgMi43IDEuOSIvPjxwYXRoIGQ9Ik0xNy4xIDE1LjJjLjMtLjQuNi0uOS43LTEuNCIvPjwvc3ZnPg==)](https://deepwiki.com/takeshy/mcp-gatekeeper)
 
 A security-focused MCP (Model Context Protocol) gateway that enables AI assistants to safely execute shell commands with fine-grained access control.
 
