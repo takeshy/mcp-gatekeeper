@@ -1,0 +1,133 @@
+{
+  "tools": [
+    {
+      "name": "list-calendars",
+      "description": "List all Google Calendar calendars accessible to the user",
+      "command": "gcal",
+      "args_prefix": ["list-calendars"],
+      "allowed_arg_globs": [""],
+      "sandbox": "none",
+      "ui_type": "json"
+    },
+    {
+      "name": "list-events",
+      "description": "List upcoming events from a Google Calendar. Optional flags: --calendar-id=, --time-min=, --time-max= (RFC3339), --max-results=, --single-events=, --order-by=",
+      "command": "gcal",
+      "args_prefix": ["list-events"],
+      "allowed_arg_globs": ["", "**"],
+      "sandbox": "none",
+      "ui_type": "json"
+    },
+    {
+      "name": "get-event",
+      "description": "Get details of a specific calendar event. Required: --event-id=. Optional: --calendar-id=",
+      "command": "gcal",
+      "args_prefix": ["get-event"],
+      "allowed_arg_globs": ["**"],
+      "sandbox": "none",
+      "ui_type": "json"
+    },
+    {
+      "name": "search-events",
+      "description": "Search calendar events by text query. Required: --query=. Optional: --calendar-id=, --time-min=, --time-max=, --max-results=",
+      "command": "gcal",
+      "args_prefix": ["search-events"],
+      "allowed_arg_globs": ["**"],
+      "sandbox": "none",
+      "ui_type": "json"
+    },
+    {
+      "name": "create-event",
+      "description": "Create a new calendar event. Required: --summary=, --start=, --end= (RFC3339 or YYYY-MM-DD). Optional: --calendar-id=, --description=, --location=, --attendees= (comma-separated emails), --timezone=",
+      "command": "gcal",
+      "args_prefix": ["create-event"],
+      "allowed_arg_globs": ["**"],
+      "sandbox": "none",
+      "ui_type": "json"
+    },
+    {
+      "name": "update-event",
+      "description": "Update an existing calendar event. Required: --event-id=. Optional: --calendar-id=, --summary=, --description=, --location=, --start=, --end=, --attendees=",
+      "command": "gcal",
+      "args_prefix": ["update-event"],
+      "allowed_arg_globs": ["**"],
+      "sandbox": "none",
+      "ui_type": "json"
+    },
+    {
+      "name": "delete-event",
+      "description": "Delete a calendar event. Required: --event-id=. Optional: --calendar-id=",
+      "command": "gcal",
+      "args_prefix": ["delete-event"],
+      "allowed_arg_globs": ["**"],
+      "sandbox": "none",
+      "ui_type": "json"
+    },
+    {
+      "name": "respond-to-event",
+      "description": "Respond to a calendar event invitation. Required: --event-id=, --response= (accepted/declined/tentative). Optional: --calendar-id=",
+      "command": "gcal",
+      "args_prefix": ["respond-to-event"],
+      "allowed_arg_globs": ["**"],
+      "sandbox": "none",
+      "ui_type": "json"
+    },
+    {
+      "name": "show-calendar",
+      "description": "Interactive calendar view showing events in a month/week grid with ability to add and delete events",
+      "command": "gcal",
+      "args_prefix": ["list-events", "--max-results=100", "--single-events=true", "--order-by=startTime"],
+      "allowed_arg_globs": ["", "**"],
+      "sandbox": "none",
+      "ui_template": "templates/calendar.html",
+      "ui_config": {
+        "visibility": ["model", "app"]
+      }
+    },
+    {
+      "name": "gcal-list-events-app",
+      "description": "List events for a date range (app-only, used by show-calendar UI)",
+      "command": "gcal",
+      "args_prefix": ["list-events", "--max-results=100", "--single-events=true", "--order-by=startTime"],
+      "allowed_arg_globs": ["", "**"],
+      "sandbox": "none",
+      "ui_config": {
+        "visibility": ["app"]
+      }
+    },
+    {
+      "name": "gcal-create-event-app",
+      "description": "Create an event (app-only, used by show-calendar UI)",
+      "command": "gcal",
+      "args_prefix": ["create-event"],
+      "allowed_arg_globs": ["**"],
+      "sandbox": "none",
+      "ui_config": {
+        "visibility": ["app"]
+      }
+    },
+    {
+      "name": "gcal-delete-event-app",
+      "description": "Delete an event (app-only, used by show-calendar UI)",
+      "command": "gcal",
+      "args_prefix": ["delete-event"],
+      "allowed_arg_globs": ["**"],
+      "sandbox": "none",
+      "ui_config": {
+        "visibility": ["app"]
+      }
+    },
+    {
+      "name": "gcal-get-event-app",
+      "description": "Get event details (app-only, used by show-calendar UI)",
+      "command": "gcal",
+      "args_prefix": ["get-event"],
+      "allowed_arg_globs": ["**"],
+      "sandbox": "none",
+      "ui_config": {
+        "visibility": ["app"]
+      }
+    }
+  ],
+  "allowed_env_keys": ["HOME", "USER", "PATH", "LANG", "LC_*", "XDG_CONFIG_HOME"]
+}
