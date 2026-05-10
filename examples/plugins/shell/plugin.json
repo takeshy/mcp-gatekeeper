@@ -4,7 +4,7 @@
       "name": "ls",
       "description": "List directory contents",
       "command": "ls",
-      "allowed_arg_globs": ["", "-l", "-la", "-lah", "-a", "*"],
+      "allowed_arg_globs": ["", "-l", "-la", "-lah", "-a", "**"],
       "sandbox": "bubblewrap",
       "ui_type": "log"
     },
@@ -12,7 +12,7 @@
       "name": "ls-table",
       "description": "List directory contents (table view)",
       "command": "ls",
-      "allowed_arg_globs": ["", "-l", "-la", "-lah", "-a", "*"],
+      "allowed_arg_globs": ["", "-l", "-la", "-lah", "-a", "**"],
       "sandbox": "bubblewrap",
       "ui_template": "templates/table.html"
     },
@@ -20,7 +20,7 @@
       "name": "cat",
       "description": "Display file contents",
       "command": "cat",
-      "allowed_arg_globs": ["*"],
+      "allowed_arg_globs": ["**"],
       "sandbox": "bubblewrap",
       "ui_type": "log"
     },
@@ -28,7 +28,7 @@
       "name": "find",
       "description": "Search for files",
       "command": "find",
-      "allowed_arg_globs": ["*"],
+      "allowed_arg_globs": ["**"],
       "sandbox": "bubblewrap",
       "ui_type": "log"
     },
@@ -36,7 +36,7 @@
       "name": "grep",
       "description": "Search file contents",
       "command": "grep",
-      "allowed_arg_globs": ["*"],
+      "allowed_arg_globs": ["**"],
       "sandbox": "bubblewrap",
       "ui_type": "log"
     }
