@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"encoding/json"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -178,6 +179,33 @@ func TestForwardParseError(t *testing.T) {
 	_, err := client.Forward(context.Background(), rawReq)
 	if err == nil {
 		t.Error("expected error when forwarding invalid JSON")
+	}
+}
+
+func TestForwardPreservesClientRequestID(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses a POSIX shell")
+	}
+	client := NewClient(&ClientConfig{
+		Command: "sh",
+		Args: []string{"-c", `IFS= read -r line
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{}}'
+IFS= read -r wait_for_close`},
+		Timeout: 2 * time.Second,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := client.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer client.Close()
+
+	resp, err := client.Forward(ctx, []byte(`{"jsonrpc":"2.0","id":"client-42","method":"tools/list","params":{}}`))
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if string(resp.ID) != `"client-42"` {
+		t.Fatalf("expected client request ID to be preserved, got %s", resp.ID)
 	}
 }
 

@@ -17,9 +17,10 @@ type SSEEvent struct {
 
 // BridgeSession represents a session with its own upstream connection
 type BridgeSession struct {
-	ID           string
-	CreatedAt    time.Time
-	LastActivity time.Time
+	ID              string
+	ProtocolVersion string
+	CreatedAt       time.Time
+	LastActivity    time.Time
 	Client       *Client // Each session has its own upstream client
 	mu           sync.Mutex
 	sseChans     []chan *SSEEvent

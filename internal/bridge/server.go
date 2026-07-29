@@ -27,10 +27,10 @@ type Server struct {
 	maxResponseSize   int
 	fileStore         *FileStore
 	debug             bool
-	db                *db.DB              // Optional database for audit logging
-	oauthHandler      *oauth.Handler      // Optional OAuth handler
-	streamableHandler *StreamableHandler  // Optional Streamable HTTP handler
-	clientConfig      *ClientConfig       // Config for creating upstream clients
+	db                *db.DB             // Optional database for audit logging
+	oauthHandler      *oauth.Handler     // Optional OAuth handler
+	streamableHandler *StreamableHandler // Optional Streamable HTTP handler
+	clientConfig      *ClientConfig      // Config for creating upstream clients
 	mu                sync.RWMutex
 }
 
@@ -43,16 +43,18 @@ type ServerConfig struct {
 	WorkDir string
 
 	// Bridge settings
-	APIKey          string
-	Timeout         time.Duration
-	RateLimit       int
-	RateLimitWindow time.Duration
-	MaxResponseSize int           // Max response size in bytes (default 500000)
-	Debug           bool          // Enable debug logging
-	DB              *db.DB        // Optional database for audit logging
-	EnableOAuth     bool          // Enable OAuth authentication (requires DB)
-	OAuthIssuer     string        // OAuth issuer URL (optional, auto-detected if empty)
-	EnableStreamable bool         // Enable MCP Streamable HTTP (2025-06-18)
+	APIKey           string
+	Timeout          time.Duration
+	RateLimit        int
+	RateLimitWindow  time.Duration
+	MaxResponseSize  int           // Max response size in bytes (default 500000)
+	Debug            bool          // Enable debug logging
+	DB               *db.DB        // Optional database for audit logging
+	EnableOAuth      bool          // Enable OAuth authentication (requires DB)
+	OAuthIssuer      string        // OAuth issuer URL (optional, auto-detected if empty)
+	OAuthResource    string        // OAuth protected resource URL (optional, defaults to issuer + /mcp)
+	OAuthHTPasswd    string        // bcrypt htpasswd file for Authorization Code login
+	EnableStreamable bool          // Enable MCP Streamable HTTP (2026-07-28)
 	SessionTTL       time.Duration // Session TTL for Streamable HTTP (default 30 minutes)
 }
 
@@ -158,7 +160,7 @@ func NewServer(config *ServerConfig) (*Server, error) {
 
 	// Initialize OAuth handler if enabled and DB is available
 	if config.EnableOAuth && config.DB != nil {
-		s.oauthHandler = oauth.NewHandler(config.DB, config.OAuthIssuer)
+		s.oauthHandler = oauth.NewHandlerWithConfig(config.DB, oauth.Config{Issuer: config.OAuthIssuer, Resource: config.OAuthResource, HTPasswdPath: config.OAuthHTPasswd})
 	}
 
 	// Initialize Streamable HTTP handler if enabled
@@ -329,17 +331,19 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
-	initialized := s.client.IsInitialized()
+	initialized := s.client != nil && s.client.IsInitialized()
+	stateless := s.streamableHandler != nil
 	s.mu.RUnlock()
 
 	status := "ok"
-	if !initialized {
+	if !initialized && !stateless {
 		status = "upstream_not_initialized"
 	}
 
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":      status,
 		"initialized": initialized,
+		"stateless":   stateless,
 	})
 }
 
@@ -532,20 +536,36 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 
 // handleInitializeWithAudit handles initialize requests locally with audit logging
 func (s *Server) handleInitializeWithAudit(w http.ResponseWriter, req *Request, params string, startTime time.Time) {
+	var initializeParams struct {
+		ProtocolVersion string `json:"protocolVersion"`
+	}
+	if err := json.Unmarshal(req.Params, &initializeParams); err != nil {
+		resp := &Response{JSONRPC: "2.0", ID: req.ID, Error: &RPCError{Code: -32602, Message: "Invalid params"}}
+		s.writeJSONRPC(w, resp)
+		s.logAudit(req.Method, params, resp, err, startTime)
+		return
+	}
+	if initializeParams.ProtocolVersion == version.MCPProtocolVersion {
+		resp := &Response{JSONRPC: "2.0", ID: req.ID, Error: &RPCError{Code: -32601, Message: "Method not found"}}
+		s.writeJSONRPC(w, resp)
+		s.logAudit(req.Method, params, resp, fmt.Errorf("initialize is not part of MCP %s", version.MCPProtocolVersion), startTime)
+		return
+	}
+	if !version.IsMCPProtocolVersionSupported(initializeParams.ProtocolVersion) {
+		resp := &Response{JSONRPC: "2.0", ID: req.ID, Error: &RPCError{Code: -32600, Message: "Unsupported protocol version"}}
+		s.writeJSONRPC(w, resp)
+		s.logAudit(req.Method, params, resp, fmt.Errorf("unsupported protocol version %q", initializeParams.ProtocolVersion), startTime)
+		return
+	}
+
 	// Return bridge server info, forwarding upstream capabilities
 	capabilities := map[string]interface{}{
 		"tools": map[string]interface{}{
 			"listChanged": false,
 		},
 	}
-	if s.oauthHandler != nil {
-		capabilities["extensions"] = map[string]interface{}{
-			"io.modelcontextprotocol/oauth-client-credentials": map[string]interface{}{},
-		}
-	}
-
 	result := map[string]interface{}{
-		"protocolVersion": version.MCPProtocolVersion,
+		"protocolVersion": initializeParams.ProtocolVersion,
 		"capabilities":    capabilities,
 		"serverInfo": map[string]interface{}{
 			"name":    "mcp-gatekeeper-bridge",

@@ -19,6 +19,7 @@ import (
 	"github.com/takeshy/mcp-gatekeeper/internal/oauth"
 	"github.com/takeshy/mcp-gatekeeper/internal/plugin"
 	"github.com/takeshy/mcp-gatekeeper/internal/policy"
+	"github.com/takeshy/mcp-gatekeeper/internal/version"
 )
 
 // RateLimiter implements a simple rate limiter
@@ -71,9 +72,9 @@ type HTTPServer struct {
 	rateLimiter       *RateLimiter
 	router            chi.Router
 	rootDir           string
-	expectedAPIKey    string              // Expected API key for authentication
-	db                *db.DB              // Optional database for audit logging
-	oauthHandler      *oauth.Handler      // Optional OAuth handler
+	expectedAPIKey    string             // Expected API key for authentication
+	db                *db.DB             // Optional database for audit logging
+	oauthHandler      *oauth.Handler     // Optional OAuth handler
 	streamableHandler *StreamableHandler // Optional streamable HTTP handler
 }
 
@@ -87,7 +88,9 @@ type HTTPConfig struct {
 	DB               *db.DB        // Optional database for audit logging
 	EnableOAuth      bool          // Enable OAuth authentication (requires DB)
 	OAuthIssuer      string        // OAuth issuer URL (optional, auto-detected if empty)
-	EnableStreamable bool          // Enable MCP Streamable HTTP (2025-06-18)
+	OAuthResource    string        // OAuth protected resource URL (optional, defaults to issuer + /mcp)
+	OAuthHTPasswd    string        // bcrypt htpasswd file for Authorization Code login
+	EnableStreamable bool          // Enable MCP Streamable HTTP (2026-07-28)
 	SessionTTL       time.Duration // Session TTL for Streamable HTTP (default 30 minutes)
 }
 
@@ -125,7 +128,7 @@ func NewHTTPServer(plugins *plugin.Config, config *HTTPConfig) (*HTTPServer, err
 
 	// Initialize OAuth handler if enabled and DB is available
 	if config.EnableOAuth && config.DB != nil {
-		s.oauthHandler = oauth.NewHandler(config.DB, config.OAuthIssuer)
+		s.oauthHandler = oauth.NewHandlerWithConfig(config.DB, oauth.Config{Issuer: config.OAuthIssuer, Resource: config.OAuthResource, HTPasswdPath: config.OAuthHTPasswd})
 	}
 
 	// Initialize Streamable HTTP handler if enabled
@@ -323,6 +326,17 @@ func (s *HTTPServer) handleMCPNotification(req *Request) {
 }
 
 func (s *HTTPServer) handleMCPInitialize(req *Request) *Response {
+	var params InitializeParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, InvalidParams, "Invalid params", err.Error())
+	}
+	if params.ProtocolVersion == ProtocolVersion {
+		return NewErrorResponse(req.ID, MethodNotFound, "Method not found", req.Method)
+	}
+	if !version.IsMCPProtocolVersionSupported(params.ProtocolVersion) {
+		return NewErrorResponse(req.ID, InvalidRequest, "Unsupported protocol version", params.ProtocolVersion)
+	}
+
 	caps := ServerCapabilities{
 		Tools: &ToolsCapability{
 			ListChanged: false,
@@ -337,14 +351,8 @@ func (s *HTTPServer) handleMCPInitialize(req *Request) *Response {
 		}
 	}
 
-	if s.oauthHandler != nil {
-		caps.Extensions = map[string]map[string]interface{}{
-			"io.modelcontextprotocol/oauth-client-credentials": {},
-		}
-	}
-
 	result := &InitializeResult{
-		ProtocolVersion: ProtocolVersion,
+		ProtocolVersion: params.ProtocolVersion,
 		Capabilities:    caps,
 		ServerInfo: ServerInfo{
 			Name:    ServerName,
@@ -421,14 +429,17 @@ func (s *HTTPServer) handleMCPToolsList(req *Request) *Response {
 			Name:        t.Name,
 			Description: t.Description,
 			InputSchema: InputSchema{
-				Type:       "object",
-				Properties: props,
-				Required:   []string{},
+				Schema:                "https://json-schema.org/draft/2020-12/schema",
+				Type:                  "object",
+				Properties:            props,
+				Required:              []string{},
+				UnevaluatedProperties: boolPointer(false),
+				Extra:                 t.InputSchema,
 			},
 			Meta: BuildToolMeta(t),
 		})
 	}
-	return NewResponse(req.ID, &ListToolsResult{Tools: tools})
+	return NewResponse(req.ID, &ListToolsResult{Tools: tools, TTLMS: 0, CacheScope: "private"})
 }
 
 func (s *HTTPServer) handleMCPToolsCall(ctx context.Context, req *Request) *Response {
@@ -536,7 +547,7 @@ func (s *HTTPServer) handleMCPResourcesList(req *Request) *Response {
 		}
 	}
 
-	return NewResponse(req.ID, &ListResourcesResult{Resources: resources})
+	return NewResponse(req.ID, &ListResourcesResult{Resources: resources, TTLMS: 0, CacheScope: "private"})
 }
 
 // handleMCPResourcesRead handles resources/read requests
@@ -595,6 +606,8 @@ func (s *HTTPServer) handleMCPResourcesRead(req *Request, sessionID string) *Res
 				Text:     htmlContent,
 			},
 		},
+		TTLMS:      0,
+		CacheScope: "private",
 	})
 }
 

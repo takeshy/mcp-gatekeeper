@@ -2,7 +2,7 @@
 
 [![Go](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![MCP](https://img.shields.io/badge/MCP-2025--11-green)](https://modelcontextprotocol.io/)
+[![MCP](https://img.shields.io/badge/MCP-2026--07--28-green)](https://modelcontextprotocol.io/)
 [![DeepWiki](https://img.shields.io/badge/DeepWiki-takeshy%2Fmcp--gatekeeper-blue.svg?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IiNGRkZGRkYiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cGF0aCBkPSJNMTIgMmEzIDMgMCAwIDAgMCA2IDMgMyAwIDAgMCAwLTZ6Ii8+PHBhdGggZD0iTTE5IDlhNyA3IDAgMSAxLTE0IDBhNyA3IDAgMCAxIDE0IDB6Ii8+PHBhdGggZD0iTTE1LjkgMTcuNGMuNy43IDEuNyAxLjQgMi43IDEuOSIvPjxwYXRoIGQ9Ik0xNy4xIDE1LjJjLjMtLjQuNi0uOS43LTEuNCIvPjwvc3ZnPg==)](https://deepwiki.com/takeshy/mcp-gatekeeper)
 
 A security-focused MCP (Model Context Protocol) gateway that enables AI assistants to safely execute shell commands with fine-grained access control.
@@ -12,7 +12,7 @@ A security-focused MCP (Model Context Protocol) gateway that enables AI assistan
 - **Security First**: Multi-layer protection with policy-based argument validation, environment variable filtering, and sandboxing (bubblewrap/WASM)
 - **Flexible Deployment**: Run as stdio server for Claude Desktop, HTTP API for web services, or bridge proxy for existing MCP servers
 - **Bridge Mode**: Expose any stdio-based MCP server (Playwright, filesystem, etc.) over HTTP with authentication, rate limiting, and large response handling
-- **OAuth 2.0 Ready**: Machine-to-machine authentication with client credentials flow ([MCP SEP-1046](https://github.com/modelcontextprotocol/ext-auth))
+- **OAuth 2.0 Ready**: Authorization Code flow with PKCE for MCP clients
 - **Plugin Architecture**: Define tools via simple JSON files with glob-based argument patterns
 - **Rich UI Support**: Generate interactive HTML interfaces via MCP Apps for command outputs
 
@@ -33,7 +33,7 @@ A security-focused MCP (Model Context Protocol) gateway that enables AI assistan
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
 │  │  Authentication & Rate Limiting                                     │   │
 │  │  ├─ API Key: Simple Bearer token authentication                     │   │
-│  │  └─ OAuth 2.0: Client credentials flow (M2M)                        │   │
+│  │  └─ OAuth 2.0: Authorization Code + PKCE                            │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                                     ↓                                       │
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
@@ -92,8 +92,8 @@ A security-focused MCP (Model Context Protocol) gateway that enables AI assistan
 - **JSON Plugin Configuration**: Define tools via simple JSON files
 - **Flexible Sandboxing**: none, bubblewrap, or WASM isolation
 - **Policy-Based Access Control**: Glob patterns for argument validation
-- **OAuth 2.0 Authentication**: Client credentials flow for M2M communication
-- **MCP Streamable HTTP**: Session-based protocol with SSE streaming (2025-06-18)
+- **OAuth 2.0 Authentication**: Authorization Code flow with mandatory PKCE
+- **MCP Streamable HTTP**: Session-based protocol with SSE streaming (2026-07-28)
 - **TUI Admin Tool**: Manage OAuth clients via terminal UI
 - **Optional Audit Logging**: SQLite-based logging for all modes
 - **Large Response Handling**: Automatic file externalization in bridge mode
@@ -265,7 +265,8 @@ Tool names must be unique across all plugins.
       "sandbox": "none|bubblewrap|wasm",
       "wasm_binary": "/path/to/binary.wasm",
       "ui_type": "log|table|json",
-      "ui_template": "templates/custom.html"
+      "ui_template": "templates/custom.html",
+      "input_schema": {"oneOf": [{"required": ["args"]}]}
     }
   ],
   "allowed_env_keys": ["PATH", "HOME", "CUSTOM_*"]
@@ -283,6 +284,7 @@ Tool names must be unique across all plugins.
 | `wasm_binary` | Yes* | WASM binary path (*required when sandbox=wasm) |
 | `ui_type` | No | Built-in UI: `table`, `json`, or `log` |
 | `ui_template` | No | Path to custom HTML template (relative to plugin.json) |
+| `input_schema` | No | Additional JSON Schema Draft 2020-12 keywords merged into the generated tool input schema |
 
 **Note**: Template paths are relative to the plugin.json file location. Parent directory references (`..`) are not allowed for security.
 
@@ -296,8 +298,10 @@ Tool names must be unique across all plugins.
 | `--plugins-dir` | - | Directory containing plugin directories/files |
 | `--api-key` | - | API key for authentication (or `MCP_GATEKEEPER_API_KEY` env) |
 | `--db` | - | SQLite database path for audit logging and OAuth (optional) |
-| `--enable-oauth` | `false` | Enable OAuth 2.0 authentication (requires `--db`) |
+| `--enable-oauth` | `false` | Enable OAuth 2.0 Authorization Code authentication (requires `--db` and `--oauth-htpasswd`) |
 | `--oauth-issuer` | - | OAuth issuer URL (optional, auto-detected if empty) |
+| `--oauth-resource` | - | Protected resource URL (optional, defaults to `<issuer>/mcp`) |
+| `--oauth-htpasswd` | - | bcrypt htpasswd file used for OAuth user login |
 | `--addr` | `:8080` | HTTP listen address (http/bridge) |
 | `--rate-limit` | `500` | Max requests per minute (http/bridge) |
 | `--upstream` | - | Upstream MCP server command (required for bridge) |
@@ -305,7 +309,7 @@ Tool names must be unique across all plugins.
 | `--max-response-size` | `500000` | Max response size in bytes (bridge) |
 | `--debug` | `false` | Enable debug logging (bridge) |
 | `--wasm-dir` | - | Directory containing WASM binaries |
-| `--enable-streamable` | `false` | Enable MCP Streamable HTTP (2025-06-18) |
+| `--enable-streamable` | `false` | Enable MCP Streamable HTTP (2026-07-28) |
 | `--session-ttl` | `30m` | Session TTL for Streamable HTTP |
 
 ## Audit Logging
@@ -336,20 +340,28 @@ sqlite3 audit.db "SELECT mode, method, tool_name, duration_ms FROM audit_logs OR
 
 ## OAuth 2.0 Authentication
 
-MCP Gatekeeper supports OAuth 2.0 client credentials flow for machine-to-machine (M2M) authentication. This is useful when you need more secure authentication than simple API keys.
+MCP Gatekeeper includes an OAuth 2.0 Authorization Code server for MCP clients. It requires PKCE with `S256`, uses pre-registered public clients, and authenticates users against a bcrypt htpasswd file. Client Credentials is not supported.
 
 ### Enable OAuth
 
 ```bash
+htpasswd -B -c oauth.htpasswd alice
+chmod 600 oauth.htpasswd
+
 ./mcp-gatekeeper --mode=http \
   --db=gatekeeper.db \
   --enable-oauth \
+  --oauth-issuer=https://mcp.example.com \
+  --oauth-resource=https://mcp.example.com/mcp \
+  --oauth-htpasswd=oauth.htpasswd \
   --addr=:8080 \
   --plugins-dir=plugins/ \
   --root-dir=/path/to/root
 ```
 
-**Note**: OAuth requires `--db` to store client credentials and tokens.
+Only bcrypt (`htpasswd -B`) password hashes are accepted. The password file must be a regular file and must not be readable or writable by group or other users. OAuth also requires `--db` to store registered clients, authorization codes, and tokens.
+
+For reverse-proxy deployments, set `--oauth-issuer` to the public authorization-server URL. The protected resource defaults to `<issuer>/mcp`; use `--oauth-resource` when the MCP endpoint has a different public URL.
 
 ### Create OAuth Clients
 
@@ -359,47 +371,32 @@ Use the TUI admin tool to create OAuth clients:
 ./mcp-gatekeeper-admin --db=gatekeeper.db
 ```
 
-Navigate to "OAuth Clients" → "New Client" → Enter client ID → Save the generated client secret.
+Navigate to "OAuth Clients" → "New Client", then enter:
 
-### OAuth Flow (Client Credentials)
+1. A client ID.
+2. One or more exact redirect URIs, separated by commas. HTTPS is required except for HTTP loopback URIs.
+3. Space-separated scopes. The `mcp` scope is required.
 
-```bash
-# 1. Get access token
-curl -X POST http://localhost:8080/oauth/token \
-  -d "grant_type=client_credentials&client_id=myclient&client_secret=SECRET"
+Clients are public and do not have a client secret.
 
-# Response:
-# {
-#   "access_token": "...",
-#   "token_type": "Bearer",
-#   "expires_in": 3600,
-#   "refresh_token": "..."
-# }
+### OAuth Flow (Authorization Code + PKCE)
 
-# 2. Call MCP endpoint
-curl -X POST http://localhost:8080/mcp \
-  -H "Authorization: Bearer ACCESS_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+The MCP client discovers the authorization server through the well-known metadata endpoints, then:
 
-# 3. Refresh token (when access token expires)
-curl -X POST http://localhost:8080/oauth/token \
-  -d "grant_type=refresh_token&refresh_token=REFRESH_TOKEN&client_id=myclient&client_secret=SECRET"
-```
+1. Generates a PKCE verifier and `S256` challenge.
+2. Opens `/oauth/authorize` with `response_type=code`, its registered `client_id` and `redirect_uri`, `scope=mcp`, `resource=<public-base-url>/mcp`, `state`, and the PKCE challenge.
+3. The user signs in and approves access. The server redirects an authorization code to the registered URI.
+4. Exchanges the code at `/oauth/token` using `grant_type=authorization_code`, `client_id`, the identical `redirect_uri`, and `code_verifier`.
+5. Uses the returned bearer access token at `/mcp`. Refresh tokens are rotated at `/oauth/token` with `grant_type=refresh_token`, `client_id`, and the same `resource`.
 
-You can also use HTTP Basic auth for client credentials:
-
-```bash
-curl -X POST http://localhost:8080/oauth/token \
-  -H "Authorization: Basic BASE64(client_id:client_secret)" \
-  -d "grant_type=client_credentials"
-```
+Authorization codes are single-use and bound to the client, redirect URI, resource, scopes, and PKCE challenge. Access and refresh tokens are opaque and resource-bound.
 
 ### OAuth Endpoints
 
 | Endpoint | Description |
 |----------|-------------|
-| `POST /oauth/token` | Token endpoint (client_credentials, refresh_token) |
+| `GET, POST /oauth/authorize` | User login, consent, and authorization code endpoint |
+| `POST /oauth/token` | Token endpoint (`authorization_code`, `refresh_token`) |
 | `GET /.well-known/oauth-authorization-server` | OAuth server metadata |
 | `GET /.well-known/openid-configuration` | OpenID Connect discovery |
 | `GET /.well-known/oauth-protected-resource` | Protected resource metadata (RFC 9728) |
@@ -409,8 +406,9 @@ curl -X POST http://localhost:8080/oauth/token \
 
 | Token | Lifetime |
 |-------|----------|
+| Authorization Code | 5 minutes, single use |
 | Access Token | 1 hour |
-| Refresh Token | Unlimited (until client revoked) |
+| Refresh Token | Until used, rotated, or the client is revoked |
 
 ### Dual Authentication
 
@@ -456,7 +454,10 @@ go install github.com/takeshy/mcp-gatekeeper/cmd/admin@latest
 
 ## MCP Streamable HTTP
 
-MCP Gatekeeper supports the MCP Streamable HTTP transport (protocol version 2025-06-18), enabling session-based communication with SSE streaming.
+MCP Gatekeeper supports the stateless MCP HTTP transport (protocol version 2026-07-28), while retaining the session-based Streamable HTTP transport for legacy clients.
+Clients using protocol versions `2025-06-18` and `2024-11-05` remain supported; the server echoes the version selected during initialization.
+
+In `2026-07-28` mode, initialization, sessions, Roots, Sampling, and protocol Logging are not advertised or handled. Use deployment-level telemetry such as OpenTelemetry or your platform's logging service. The legacy implementations remain isolated to requests using an older protocol version.
 
 ### Enable Streamable HTTP
 
@@ -479,50 +480,25 @@ MCP Gatekeeper supports the MCP Streamable HTTP transport (protocol version 2025
 
 ### Endpoints
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/mcp` | Send JSON-RPC requests/notifications |
-| GET | `/mcp` | Open SSE stream for server→client notifications |
-| DELETE | `/mcp` | Terminate session |
+For MCP `2026-07-28`, only stateless `POST /mcp` is used. `initialize`, `Mcp-Session-Id`, the SSE `GET`, and session `DELETE` are not part of this protocol version. Legacy clients negotiating `2025-06-18` or `2024-11-05` continue to use the stateful POST/GET/DELETE flow.
 
-### Protocol Flow
+### Stateless protocol flow (2026-07-28)
+
+Capabilities are supplied on each request when needed; no initialization handshake or session affinity is required.
 
 ```bash
-# 1. Initialize (creates session)
 curl -X POST http://localhost:8080/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
-
-# Response includes Mcp-Session-Id header
-# Mcp-Session-Id: 550e8400-e29b-41d4-a716-446655440000
-
-# 2. Subsequent requests include session ID
-curl -X POST http://localhost:8080/mcp \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json" \
-  -H "Mcp-Session-Id: 550e8400-e29b-41d4-a716-446655440000" \
-  -H "MCP-Protocol-Version: 2025-06-18" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
-
-# 3. Open SSE stream for server notifications
-curl -N http://localhost:8080/mcp \
-  -H "Accept: text/event-stream" \
-  -H "Mcp-Session-Id: 550e8400-e29b-41d4-a716-446655440000" \
-  -H "MCP-Protocol-Version: 2025-06-18"
-
-# 4. Terminate session
-curl -X DELETE http://localhost:8080/mcp \
-  -H "Mcp-Session-Id: 550e8400-e29b-41d4-a716-446655440000"
+  -H "MCP-Protocol-Version: 2026-07-28" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"capabilities":{}}}'
 ```
+
+Tool input schemas advertise JSON Schema Draft 2020-12. MCP Apps remain available through tool and resource `_meta.ui` metadata; see [MCP Apps (Interactive UI)](#mcp-apps-interactive-ui).
 
 ### Bridge Mode with Streamable HTTP
 
-In bridge mode with `--enable-streamable`, each session creates its own upstream MCP server process. This provides complete isolation between sessions:
-
-- Each `initialize` request spawns a new upstream process
-- Session state is not shared between clients
-- Upstream processes are terminated when sessions expire or are deleted
+In bridge mode, each MCP `2026-07-28` request is forwarded through a request-scoped upstream process and is closed after the response, so the bridge retains no client session. Legacy protocol versions continue to create one isolated upstream process per session; those processes terminate when their sessions expire or are deleted.
 
 ## Bridge Mode Features
 

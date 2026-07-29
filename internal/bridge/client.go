@@ -241,12 +241,8 @@ func (c *Client) readStderr() {
 // Initialize sends the initialize request to the upstream server
 func (c *Client) Initialize(ctx context.Context) (*Response, error) {
 	params := map[string]interface{}{
-		"protocolVersion": version.MCPProtocolVersion,
-		"capabilities": map[string]interface{}{
-			"roots": map[string]interface{}{
-				"listChanged": false,
-			},
-		},
+		"protocolVersion": version.MCPLegacyStreamableProtocolVersion,
+		"capabilities":    map[string]interface{}{},
 		"clientInfo": map[string]interface{}{
 			"name":    "mcp-gatekeeper-bridge",
 			"version": version.Version,
@@ -394,7 +390,11 @@ func (c *Client) Forward(ctx context.Context, rawRequest []byte) (*Response, err
 		}
 	}
 
-	return c.Call(ctx, req.Method, params)
+	resp, err := c.Call(ctx, req.Method, params)
+	if resp != nil {
+		resp.ID = append(json.RawMessage(nil), req.ID...)
+	}
+	return resp, err
 }
 
 // IsInitialized returns whether the client has been initialized
@@ -404,14 +404,10 @@ func (c *Client) IsInitialized() bool {
 
 // handleUpstreamRequest handles requests from upstream server (MCP bidirectional communication)
 func (c *Client) handleUpstreamRequest(id json.RawMessage, method string, raw string) {
-	var result interface{}
-
 	switch method {
 	case "roots/list":
-		// Return empty roots list
-		result = map[string]interface{}{
-			"roots": []interface{}{},
-		}
+		c.sendErrorResponse(id, -32601, "Roots are not supported")
+		return
 	case "sampling/createMessage":
 		// Not supported, return error
 		c.sendErrorResponse(id, -32601, "Method not supported")
@@ -421,21 +417,6 @@ func (c *Client) handleUpstreamRequest(id json.RawMessage, method string, raw st
 		c.sendErrorResponse(id, -32601, "Method not found")
 		return
 	}
-
-	c.sendResultResponse(id, result)
-}
-
-func (c *Client) sendResultResponse(id json.RawMessage, result interface{}) {
-	resultJSON, _ := json.Marshal(result)
-	resp := Response{
-		JSONRPC: "2.0",
-		ID:      id,
-		Result:  resultJSON,
-	}
-	data, _ := json.Marshal(resp)
-	c.mu.Lock()
-	fmt.Fprintf(c.stdin, "%s\n", data)
-	c.mu.Unlock()
 }
 
 func (c *Client) sendErrorResponse(id json.RawMessage, code int, message string) {
