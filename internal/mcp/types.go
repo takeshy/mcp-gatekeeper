@@ -104,10 +104,8 @@ type InitializeResult struct {
 
 // DiscoverResult advertises the versions and capabilities supported by a stateless server.
 type DiscoverResult struct {
-	ResultType        string             `json:"resultType"`
 	SupportedVersions []string           `json:"supportedVersions"`
 	Capabilities      ServerCapabilities `json:"capabilities"`
-	ServerInfo        ServerInfo         `json:"serverInfo"`
 }
 
 // ServerCapabilities represents server capabilities
@@ -185,8 +183,8 @@ type Items struct {
 // ListToolsResult represents the result of tools/list request
 type ListToolsResult struct {
 	Tools      []Tool `json:"tools"`
-	TTLMS      int64  `json:"ttlMs"`
-	CacheScope string `json:"cacheScope"`
+	TTLMS      int64  `json:"ttlMs,omitempty"`
+	CacheScope string `json:"cacheScope,omitempty"`
 }
 
 // CallToolParams represents params for tools/call request
@@ -262,8 +260,8 @@ type Resource struct {
 // ListResourcesResult represents the result of resources/list request
 type ListResourcesResult struct {
 	Resources  []Resource `json:"resources"`
-	TTLMS      int64      `json:"ttlMs"`
-	CacheScope string     `json:"cacheScope"`
+	TTLMS      int64      `json:"ttlMs,omitempty"`
+	CacheScope string     `json:"cacheScope,omitempty"`
 }
 
 // ReadResourceParams represents params for resources/read request
@@ -282,6 +280,6 @@ type ResourceContent struct {
 // ReadResourceResult represents the result of resources/read request
 type ReadResourceResult struct {
 	Contents   []ResourceContent `json:"contents"`
-	TTLMS      int64             `json:"ttlMs"`
-	CacheScope string            `json:"cacheScope"`
+	TTLMS      int64             `json:"ttlMs,omitempty"`
+	CacheScope string            `json:"cacheScope,omitempty"`
 }

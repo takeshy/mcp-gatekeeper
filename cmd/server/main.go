@@ -41,7 +41,7 @@ func main() {
 		oauthResource    = flag.String("oauth-resource", "", "OAuth protected resource URL (optional, defaults to issuer + /mcp)")
 		oauthHTPasswd    = flag.String("oauth-htpasswd", "", "bcrypt htpasswd file for OAuth Authorization Code login")
 		enableStreamable = flag.Bool("enable-streamable", false, "Enable MCP Streamable HTTP (2026-07-28)")
-		sessionTTL       = flag.Duration("session-ttl", 30*time.Minute, "Session TTL for Streamable HTTP")
+		sessionTTL       = flag.Duration("session-ttl", 30*time.Minute, "Session TTL for legacy Streamable HTTP clients")
 	)
 	flag.Parse()
 
@@ -105,9 +105,9 @@ func main() {
 			os.Exit(1)
 		}
 		defer database.Close()
-		fmt.Printf("Audit logging enabled (db: %s)\n", *dbPath)
+		fmt.Fprintf(os.Stderr, "Audit logging enabled (db: %s)\n", *dbPath)
 		if *enableOAuth {
-			fmt.Printf("OAuth 2.0 authentication enabled\n")
+			fmt.Fprintln(os.Stderr, "OAuth 2.0 authentication enabled")
 		}
 	}
 
@@ -220,7 +220,7 @@ func main() {
 		} else {
 			createdDirs := sandboxExecutor.GetSandboxCreatedDirs()
 			if len(createdDirs) > 0 {
-				fmt.Printf("Created bubblewrap mount directories: %v\n", createdDirs)
+				fmt.Fprintf(os.Stderr, "Created bubblewrap mount directories: %v\n", createdDirs)
 			}
 		}
 	}
@@ -265,18 +265,9 @@ func runStdio(plugins *plugin.Config, apiKey string, rootDir string, wasmDir str
 		return fmt.Errorf("failed to create stdio server: %w", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Handle signals
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		cancel()
-	}()
-
-	return server.Run(ctx)
+	// Keep the default SIGINT/SIGTERM behavior in stdio mode. MCP clients use
+	// those signals to terminate the child process and expect it to exit promptly.
+	return server.Run(context.Background())
 }
 
 func runHTTP(plugins *plugin.Config, addr string, rateLimit int, rootDir string, wasmDir string, apiKey string, database *db.DB, enableOAuth bool, oauthIssuer, oauthResource, oauthHTPasswd string, enableStreamable bool, sessionTTL time.Duration) error {
@@ -336,7 +327,7 @@ func runHTTP(plugins *plugin.Config, addr string, rateLimit int, rootDir string,
 		fmt.Printf("API key authentication enabled\n")
 	}
 	if enableStreamable {
-		fmt.Printf("MCP Streamable HTTP enabled (session TTL: %s)\n", sessionTTL)
+		fmt.Printf("MCP HTTP enabled (2026 stateless; legacy session TTL: %s)\n", sessionTTL)
 	}
 	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		return fmt.Errorf("HTTP server error: %w", err)
@@ -416,7 +407,7 @@ func runBridge(addr string, upstream string, upstreamEnv []string, apiKey string
 		fmt.Printf("API key authentication enabled\n")
 	}
 	if enableStreamable {
-		fmt.Printf("MCP Streamable HTTP enabled (session TTL: %s, separate upstream per session)\n", sessionTTL)
+		fmt.Printf("MCP HTTP enabled (2026 stateless; legacy session TTL: %s, separate upstream per session)\n", sessionTTL)
 	}
 	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		return fmt.Errorf("HTTP server error: %w", err)
@@ -427,9 +418,9 @@ func runBridge(addr string, upstream string, upstreamEnv []string, apiKey string
 
 func printLoadedTools(plugins *plugin.Config) {
 	tools := plugins.ListTools()
-	fmt.Println("=== Loaded Tools ===")
+	fmt.Fprintln(os.Stderr, "=== Loaded Tools ===")
 	if len(tools) == 0 {
-		fmt.Println("(no tools loaded)")
+		fmt.Fprintln(os.Stderr, "(no tools loaded)")
 		return
 	}
 
@@ -442,7 +433,7 @@ func printLoadedTools(plugins *plugin.Config) {
 		} else if tool.Sandbox == plugin.SandboxTypeNone {
 			sandboxInfo = fmt.Sprintf("none: %s", tool.Command)
 		}
-		fmt.Printf("  - %s: %s [%s]\n", tool.Name, tool.Description, sandboxInfo)
+		fmt.Fprintf(os.Stderr, "  - %s: %s [%s]\n", tool.Name, tool.Description, sandboxInfo)
 	}
-	fmt.Println()
+	fmt.Fprintln(os.Stderr)
 }

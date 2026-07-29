@@ -213,6 +213,10 @@ func TestStreamableHandler_LatestProtocolDiscover(t *testing.T) {
 	if result["resultType"] != "complete" {
 		t.Fatalf("expected complete discovery result, got %#v", result)
 	}
+	meta, ok := result["_meta"].(map[string]interface{})
+	if !ok || meta["io.modelcontextprotocol/serverInfo"] == nil {
+		t.Fatalf("expected server info in result metadata, got %#v", result)
+	}
 	versions := result["supportedVersions"].([]interface{})
 	if len(versions) == 0 || versions[0] != StreamableProtocolVersion {
 		t.Fatalf("expected latest supported version first, got %#v", versions)

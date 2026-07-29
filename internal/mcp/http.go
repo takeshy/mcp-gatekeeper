@@ -439,7 +439,7 @@ func (s *HTTPServer) handleMCPToolsList(req *Request) *Response {
 			Meta: BuildToolMeta(t),
 		})
 	}
-	return NewResponse(req.ID, &ListToolsResult{Tools: tools, TTLMS: 0, CacheScope: "private"})
+	return NewResponse(req.ID, &ListToolsResult{Tools: tools})
 }
 
 func (s *HTTPServer) handleMCPToolsCall(ctx context.Context, req *Request) *Response {
@@ -547,7 +547,7 @@ func (s *HTTPServer) handleMCPResourcesList(req *Request) *Response {
 		}
 	}
 
-	return NewResponse(req.ID, &ListResourcesResult{Resources: resources, TTLMS: 0, CacheScope: "private"})
+	return NewResponse(req.ID, &ListResourcesResult{Resources: resources})
 }
 
 // handleMCPResourcesRead handles resources/read requests
@@ -606,8 +606,6 @@ func (s *HTTPServer) handleMCPResourcesRead(req *Request, sessionID string) *Res
 				Text:     htmlContent,
 			},
 		},
-		TTLMS:      0,
-		CacheScope: "private",
 	})
 }
 

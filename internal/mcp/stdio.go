@@ -77,6 +77,9 @@ func (s *StdioServer) Run(ctx context.Context) error {
 
 		line, err := s.reader.ReadString('\n')
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
 			if err == io.EOF {
 				return nil
 			}
@@ -154,35 +157,52 @@ func (s *StdioServer) handleRequest(ctx context.Context, req *Request) (*Respons
 		if err := validateStatelessMetadata(req); err != nil {
 			return NewErrorResponse(req.ID, UnsupportedProtocolVersionCode, "Invalid MCP request metadata", err.Error()), nil
 		}
-		return NewResponse(req.ID, discoverResult(s.hasUIEnabledTools(), nil)), nil
+		resp := NewResponse(req.ID, discoverResult(s.hasUIEnabledTools(), nil))
+		decorateStatelessResult(resp, req.Method)
+		return resp, nil
 	case "tools/list":
 		if err := s.validateOperationalRequest(req); err != nil {
 			return NewErrorResponse(req.ID, UnsupportedProtocolVersionCode, "Invalid MCP request metadata", err.Error()), nil
 		}
-		return s.handleToolsList(req)
+		resp, err := s.handleToolsList(req)
+		return s.decorateOperationalResponse(req, resp, err)
 	case "tools/call":
 		if err := s.validateOperationalRequest(req); err != nil {
 			return NewErrorResponse(req.ID, UnsupportedProtocolVersionCode, "Invalid MCP request metadata", err.Error()), nil
 		}
-		return s.handleToolsCall(ctx, req)
+		resp, err := s.handleToolsCall(ctx, req)
+		return s.decorateOperationalResponse(req, resp, err)
 	case "resources/list":
 		if err := s.validateOperationalRequest(req); err != nil {
 			return NewErrorResponse(req.ID, UnsupportedProtocolVersionCode, "Invalid MCP request metadata", err.Error()), nil
 		}
-		return s.handleResourcesList(req)
+		resp, err := s.handleResourcesList(req)
+		return s.decorateOperationalResponse(req, resp, err)
 	case "resources/read":
 		if err := s.validateOperationalRequest(req); err != nil {
 			return NewErrorResponse(req.ID, UnsupportedProtocolVersionCode, "Invalid MCP request metadata", err.Error()), nil
 		}
-		return s.handleResourcesRead(req)
+		resp, err := s.handleResourcesRead(req)
+		return s.decorateOperationalResponse(req, resp, err)
 	case "ping":
 		if err := s.validateOperationalRequest(req); err != nil {
 			return NewErrorResponse(req.ID, UnsupportedProtocolVersionCode, "Invalid MCP request metadata", err.Error()), nil
 		}
-		return NewResponse(req.ID, struct{}{}), nil
+		resp := NewResponse(req.ID, struct{}{})
+		if !s.initialized {
+			decorateStatelessResult(resp, req.Method)
+		}
+		return resp, nil
 	default:
 		return NewErrorResponse(req.ID, MethodNotFound, "Method not found", req.Method), nil
 	}
+}
+
+func (s *StdioServer) decorateOperationalResponse(req *Request, resp *Response, err error) (*Response, error) {
+	if err == nil && !s.initialized {
+		decorateStatelessResult(resp, req.Method)
+	}
+	return resp, err
 }
 
 func (s *StdioServer) validateOperationalRequest(req *Request) error {
@@ -285,7 +305,7 @@ func (s *StdioServer) handleToolsList(req *Request) (*Response, error) {
 			Meta: BuildToolMeta(t),
 		})
 	}
-	return NewResponse(req.ID, &ListToolsResult{Tools: tools, TTLMS: 0, CacheScope: "private"}), nil
+	return NewResponse(req.ID, &ListToolsResult{Tools: tools}), nil
 }
 
 func boolPointer(value bool) *bool {
@@ -412,7 +432,7 @@ func (s *StdioServer) handleResourcesList(req *Request) (*Response, error) {
 		}
 	}
 
-	return NewResponse(req.ID, &ListResourcesResult{Resources: resources, TTLMS: 0, CacheScope: "private"}), nil
+	return NewResponse(req.ID, &ListResourcesResult{Resources: resources}), nil
 }
 
 func (s *StdioServer) handleResourcesRead(req *Request) (*Response, error) {
@@ -469,8 +489,6 @@ func (s *StdioServer) handleResourcesRead(req *Request) (*Response, error) {
 				Text:     htmlContent,
 			},
 		},
-		TTLMS:      0,
-		CacheScope: "private",
 	}), nil
 }
 

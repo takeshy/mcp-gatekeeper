@@ -10,15 +10,16 @@ const MCPProtocolVersion = "2026-07-28"
 // the Streamable HTTP transport from the protocol itself.
 const MCPStreamableProtocolVersion = MCPProtocolVersion
 
-// MCPLegacyStreamableProtocolVersion is the newest stateful protocol retained
-// for backwards compatibility.
-const MCPLegacyStreamableProtocolVersion = "2025-06-18"
+// MCPLegacyStreamableProtocolVersion is the newest initialize-based protocol
+// retained for backwards compatibility.
+const MCPLegacyStreamableProtocolVersion = "2025-11-25"
 
 // SupportedMCPProtocolVersions lists recognized protocol versions, newest first.
 // Only legacy versions use initialization; 2026-07-28 requests are stateless.
 var SupportedMCPProtocolVersions = []string{
 	MCPProtocolVersion,
 	MCPLegacyStreamableProtocolVersion,
+	"2025-06-18",
 	"2024-11-05",
 }
 

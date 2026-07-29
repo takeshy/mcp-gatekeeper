@@ -12,7 +12,8 @@ const (
 	HeaderMCPMethod = "Mcp-Method"
 	HeaderMCPName   = "Mcp-Name"
 
-	HeaderMismatchCode             = -32001
+	HeaderMismatchCode             = -32020
+	MissingRequiredCapabilityCode  = -32021
 	UnsupportedProtocolVersionCode = -32022
 )
 
@@ -69,7 +70,7 @@ func validateStatelessMetadata(req *Request) error {
 	if params.Meta.ProtocolVersion != version.MCPProtocolVersion {
 		return fmt.Errorf("unsupported protocol version %q", params.Meta.ProtocolVersion)
 	}
-	if params.Meta.ClientInfo == nil || params.Meta.ClientInfo.Name == "" || params.Meta.ClientInfo.Version == "" {
+	if params.Meta.ClientInfo != nil && (params.Meta.ClientInfo.Name == "" || params.Meta.ClientInfo.Version == "") {
 		return fmt.Errorf("params._meta clientInfo must include name and version")
 	}
 	if params.Meta.ClientCapabilities == nil {
@@ -87,12 +88,36 @@ func discoverResult(hasResources bool, extensions map[string]map[string]interfac
 		caps.Resources = &ResourcesCapability{Subscribe: false, ListChanged: false}
 	}
 	return &DiscoverResult{
-		ResultType:        "complete",
 		SupportedVersions: append([]string(nil), version.SupportedMCPProtocolVersions...),
 		Capabilities:      caps,
-		ServerInfo: ServerInfo{
-			Name:    ServerName,
-			Version: ServerVersion,
-		},
 	}
+}
+
+func decorateStatelessResult(resp *Response, method string) {
+	if resp == nil || resp.Error != nil || resp.Result == nil {
+		return
+	}
+	data, err := json.Marshal(resp.Result)
+	if err != nil {
+		return
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return
+	}
+	result["resultType"] = "complete"
+	meta, _ := result["_meta"].(map[string]interface{})
+	if meta == nil {
+		meta = make(map[string]interface{})
+	}
+	meta["io.modelcontextprotocol/serverInfo"] = map[string]interface{}{
+		"name": ServerName, "version": ServerVersion,
+	}
+	result["_meta"] = meta
+	switch method {
+	case "server/discover", "tools/list", "resources/list", "resources/read", "resources/templates/list", "prompts/list":
+		result["ttlMs"] = 0
+		result["cacheScope"] = "private"
+	}
+	resp.Result = result
 }

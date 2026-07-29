@@ -108,6 +108,17 @@ func (h *StreamableHandler) HandlePost(w http.ResponseWriter, r *http.Request) {
 		h.handleStatelessPost(w, r, &req, rawReq, startTime)
 		return
 	}
+	if protocolVersion != "" && !version.IsMCPProtocolVersionSupported(protocolVersion) {
+		data, _ := json.Marshal(map[string]interface{}{
+			"supported": version.SupportedMCPProtocolVersions,
+			"requested": protocolVersion,
+		})
+		resp := &Response{JSONRPC: "2.0", ID: req.ID, Error: &RPCError{
+			Code: UnsupportedProtocolVersionCode, Message: "Unsupported protocol version", Data: data,
+		}}
+		h.writeJSONRPCStatus(w, http.StatusBadRequest, resp)
+		return
+	}
 
 	// Debug log
 	if h.server.debug {
@@ -222,7 +233,7 @@ func (h *StreamableHandler) HandlePost(w http.ResponseWriter, r *http.Request) {
 // handleStatelessPost forwards one MCP 2026-07-28 request without creating a session.
 func (h *StreamableHandler) handleStatelessPost(w http.ResponseWriter, r *http.Request, req *Request, rawReq json.RawMessage, startTime time.Time) {
 	if err := validateStatelessRequest(r, req); err != nil {
-		resp := &Response{JSONRPC: "2.0", ID: req.ID, Error: &RPCError{Code: -32001, Message: err.Error()}}
+		resp := &Response{JSONRPC: "2.0", ID: req.ID, Error: &RPCError{Code: HeaderMismatchCode, Message: err.Error()}}
 		h.writeJSONRPCStatus(w, http.StatusBadRequest, resp)
 		h.server.logAudit(req.Method, string(rawReq), resp, err, startTime)
 		return
@@ -263,7 +274,7 @@ func (h *StreamableHandler) handleStatelessPost(w http.ResponseWriter, r *http.R
 	if resp == nil {
 		w.WriteHeader(http.StatusAccepted)
 	} else {
-		addStatelessCachingHints(resp, req.Method)
+		decorateStatelessResult(resp, req.Method)
 		resp = h.server.externalizeLargeContent(resp, r.Host)
 		encoded, marshalErr := json.Marshal(resp)
 		if marshalErr != nil || len(encoded) > h.server.maxResponseSize {

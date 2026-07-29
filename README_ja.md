@@ -92,7 +92,7 @@ AIアシスタントが安全にシェルコマンドを実行できるように
 - **柔軟なサンドボックス**: none, bubblewrap, WASM分離
 - **ポリシーベースのアクセス制御**: Globパターンによる引数検証
 - **OAuth 2.0認証**: PKCE必須のAuthorization Codeフロー
-- **MCP Streamable HTTP**: SSEストリーミング付きセッションベースプロトコル（2026-07-28）
+- **MCP HTTP**: ステートレスなMCP 2026-07-28と旧セッション方式の自動互換
 - **TUI管理ツール**: ターミナルUIでOAuthクライアントを管理
 - **オプションの監査ログ**: 全モード対応のSQLiteログ
 - **大容量レスポンス対応**: bridgeモードでの自動ファイル外部化
@@ -294,7 +294,7 @@ plugins/
 | `--debug` | `false` | デバッグログ有効化（bridge） |
 | `--wasm-dir` | - | WASMバイナリ格納ディレクトリ |
 | `--enable-streamable` | `false` | MCP Streamable HTTP（2026-07-28）を有効化 |
-| `--session-ttl` | `30m` | Streamable HTTPのセッションTTL |
+| `--session-ttl` | `30m` | 旧（2025系）Streamable HTTPクライアントのセッションTTL |
 
 ## 監査ログ
 
@@ -464,7 +464,7 @@ MCP GatekeeperはステートレスなMCP HTTPトランスポート（プロト�
 
 ### エンドポイント
 
-MCP `2026-07-28`では、ステートレスな`POST /mcp`のみを使用します。`initialize`、`Mcp-Session-Id`、SSEの`GET`、セッション削除の`DELETE`はこのバージョンには含まれません。`2025-06-18`または`2024-11-05`を利用する既存クライアントでは、従来のステートフルなPOST/GET/DELETEフローを引き続き使用できます。
+MCP `2026-07-28`では、ステートレスな`POST /mcp`のみを使用します。`initialize`、`Mcp-Session-Id`、SSEの`GET`、セッション削除の`DELETE`はこのバージョンには含まれません。`2025-11-25`、`2025-06-18`、または`2024-11-05`を利用する既存クライアントでは、従来のステートフルなPOST/GET/DELETEフローを引き続き使用できます。
 
 ### ステートレスプロトコルフロー（2026-07-28）
 

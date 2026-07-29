@@ -93,7 +93,7 @@ A security-focused MCP (Model Context Protocol) gateway that enables AI assistan
 - **Flexible Sandboxing**: none, bubblewrap, or WASM isolation
 - **Policy-Based Access Control**: Glob patterns for argument validation
 - **OAuth 2.0 Authentication**: Authorization Code flow with mandatory PKCE
-- **MCP Streamable HTTP**: Session-based protocol with SSE streaming (2026-07-28)
+- **MCP HTTP**: Stateless MCP 2026-07-28 with automatic legacy session compatibility
 - **TUI Admin Tool**: Manage OAuth clients via terminal UI
 - **Optional Audit Logging**: SQLite-based logging for all modes
 - **Large Response Handling**: Automatic file externalization in bridge mode
@@ -310,7 +310,7 @@ Tool names must be unique across all plugins.
 | `--debug` | `false` | Enable debug logging (bridge) |
 | `--wasm-dir` | - | Directory containing WASM binaries |
 | `--enable-streamable` | `false` | Enable MCP Streamable HTTP (2026-07-28) |
-| `--session-ttl` | `30m` | Session TTL for Streamable HTTP |
+| `--session-ttl` | `30m` | Session TTL for legacy (2025-era) Streamable HTTP clients |
 
 ## Audit Logging
 
@@ -480,7 +480,7 @@ In `2026-07-28` mode, initialization, sessions, Roots, Sampling, and protocol Lo
 
 ### Endpoints
 
-For MCP `2026-07-28`, only stateless `POST /mcp` is used. `initialize`, `Mcp-Session-Id`, the SSE `GET`, and session `DELETE` are not part of this protocol version. Legacy clients negotiating `2025-06-18` or `2024-11-05` continue to use the stateful POST/GET/DELETE flow.
+For MCP `2026-07-28`, only stateless `POST /mcp` is used. `initialize`, `Mcp-Session-Id`, the SSE `GET`, and session `DELETE` are not part of this protocol version. Legacy clients negotiating `2025-11-25`, `2025-06-18`, or `2024-11-05` continue to use the stateful POST/GET/DELETE flow.
 
 ### Stateless protocol flow (2026-07-28)
 

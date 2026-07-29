@@ -32,8 +32,9 @@ func TestStdioStatelessDiscover(t *testing.T) {
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %+v", resp.Error)
 	}
-	result, ok := resp.Result.(*DiscoverResult)
-	if !ok || result.ResultType != "complete" || len(result.SupportedVersions) == 0 {
+	result, ok := resp.Result.(map[string]interface{})
+	versions, versionsOK := result["supportedVersions"].([]interface{})
+	if !ok || result["resultType"] != "complete" || !versionsOK || len(versions) == 0 {
 		t.Fatalf("unexpected discovery result: %#v", resp.Result)
 	}
 }

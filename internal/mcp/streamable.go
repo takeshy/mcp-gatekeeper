@@ -76,6 +76,14 @@ func (h *StreamableHandler) HandlePost(w http.ResponseWriter, r *http.Request) {
 		h.handleStatelessPost(w, r, &req)
 		return
 	}
+	if protocolVersion != "" && !version.IsMCPProtocolVersionSupported(protocolVersion) {
+		h.writeJSONRPCStatus(w, http.StatusBadRequest, NewErrorResponse(req.ID, UnsupportedProtocolVersionCode,
+			"Unsupported protocol version", map[string]interface{}{
+				"supported": version.SupportedMCPProtocolVersions,
+				"requested": protocolVersion,
+			}))
+		return
+	}
 
 	// Older protocol versions use the legacy stateful initialization flow.
 	if req.Method == "initialize" {
@@ -169,6 +177,7 @@ func (h *StreamableHandler) handleStatelessPost(w http.ResponseWriter, r *http.R
 	default:
 		resp = NewErrorResponse(req.ID, MethodNotFound, "Method not found", req.Method)
 	}
+	decorateStatelessResult(resp, req.Method)
 	h.writeJSONRPC(w, nil, resp)
 }
 

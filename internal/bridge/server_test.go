@@ -365,6 +365,10 @@ IFS= read -r wait_for_close`},
 	if result["ttlMs"] != float64(0) || result["cacheScope"] != "private" {
 		t.Fatalf("expected stateless caching hints, got %#v", result)
 	}
+	meta, ok := result["_meta"].(map[string]interface{})
+	if !ok || meta["io.modelcontextprotocol/serverInfo"] == nil {
+		t.Fatalf("expected server info in result metadata, got %#v", result)
+	}
 }
 
 func newBridgeTestDB(t *testing.T) *db.DB {
