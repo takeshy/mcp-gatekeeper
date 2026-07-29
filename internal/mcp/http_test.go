@@ -49,7 +49,7 @@ func TestWWWAuthenticateHeaderWhenOAuthEnabled(t *testing.T) {
 		t.Fatalf("NewHTTPServer: %v", err)
 	}
 
-	body := bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`)
+	body := bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}`)
 	req := httptest.NewRequest(http.MethodPost, "http://example.com/mcp", body)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -66,7 +66,28 @@ func TestWWWAuthenticateHeaderWhenOAuthEnabled(t *testing.T) {
 	}
 }
 
-func TestInitializeIncludesOAuthExtension(t *testing.T) {
+func TestLegacyHTTPInitializeEchoesRequestedVersion(t *testing.T) {
+	plugins := &plugin.Config{Tools: map[string]*plugin.Tool{}}
+	server, err := NewHTTPServer(plugins, &HTTPConfig{RateLimit: 10, RateLimitWindow: time.Minute})
+	if err != nil {
+		t.Fatalf("NewHTTPServer: %v", err)
+	}
+	body := bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}`)
+	req := httptest.NewRequest(http.MethodPost, "/mcp", body)
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	var response Response
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	result := response.Result.(map[string]interface{})
+	if result["protocolVersion"] != "2024-11-05" {
+		t.Fatalf("expected requested legacy version, got %#v", result["protocolVersion"])
+	}
+}
+
+func TestInitializeDoesNotAdvertiseClientCredentials(t *testing.T) {
 	plugins := &plugin.Config{Tools: map[string]*plugin.Tool{}}
 	config := &HTTPConfig{
 		EnableOAuth:     true,
@@ -81,7 +102,7 @@ func TestInitializeIncludesOAuthExtension(t *testing.T) {
 		t.Fatalf("NewHTTPServer: %v", err)
 	}
 
-	body := bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`)
+	body := bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}`)
 	req := httptest.NewRequest(http.MethodPost, "http://example.com/mcp", body)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer test-key")
@@ -110,11 +131,7 @@ func TestInitializeIncludesOAuthExtension(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected capabilities object, got %T", result["capabilities"])
 	}
-	extensions, ok := capabilities["extensions"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("expected extensions object, got %T", capabilities["extensions"])
-	}
-	if _, ok := extensions["io.modelcontextprotocol/oauth-client-credentials"]; !ok {
-		t.Fatalf("expected oauth client credentials extension, got %v", extensions)
+	if _, ok := capabilities["extensions"]; ok {
+		t.Fatalf("client credentials extension must not be advertised: %v", capabilities)
 	}
 }

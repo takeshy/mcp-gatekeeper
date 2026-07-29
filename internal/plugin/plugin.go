@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -64,14 +65,15 @@ type UIConfig struct {
 
 // Tool represents a tool definition from a plugin file
 type Tool struct {
-	Name            string      `json:"name"`
-	Description     string      `json:"description"`
-	Command         string      `json:"command"`
-	ArgsPrefix      []string    `json:"args_prefix,omitempty"` // Fixed arguments prepended to user args
-	AllowedArgGlobs []string    `json:"allowed_arg_globs"`
-	Sandbox         SandboxType `json:"sandbox"`
-	WasmBinary      string      `json:"wasm_binary"`
-	FixedCwd        bool        `json:"fixed_cwd,omitempty"` // If true, cwd is fixed to root directory and not exposed to clients
+	Name            string                 `json:"name"`
+	Description     string                 `json:"description"`
+	Command         string                 `json:"command"`
+	ArgsPrefix      []string               `json:"args_prefix,omitempty"` // Fixed arguments prepended to user args
+	AllowedArgGlobs []string               `json:"allowed_arg_globs"`
+	Sandbox         SandboxType            `json:"sandbox"`
+	WasmBinary      string                 `json:"wasm_binary"`
+	FixedCwd        bool                   `json:"fixed_cwd,omitempty"`    // If true, cwd is fixed to root directory and not exposed to clients
+	InputSchema     map[string]interface{} `json:"input_schema,omitempty"` // Optional JSON Schema 2020-12 keywords merged into the generated schema
 	// UI settings (optional, for MCP Apps support)
 	UIType       UIType       `json:"ui_type,omitempty"`
 	OutputFormat OutputFormat `json:"output_format,omitempty"`
@@ -275,5 +277,8 @@ func (c *Config) ListTools() []*Tool {
 	for _, tool := range c.Tools {
 		tools = append(tools, tool)
 	}
+	sort.Slice(tools, func(i, j int) bool {
+		return tools[i].Name < tools[j].Name
+	})
 	return tools
 }

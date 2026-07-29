@@ -31,6 +31,20 @@ func setupStreamableHandler(t *testing.T) (*StreamableHandler, *HTTPServer) {
 	return handler, httpServer
 }
 
+const statelessMetaJSON = `"_meta":{
+	"io.modelcontextprotocol/protocolVersion":"2026-07-28",
+	"io.modelcontextprotocol/clientInfo":{"name":"test","version":"1.0"},
+	"io.modelcontextprotocol/clientCapabilities":{}
+}`
+
+func setStatelessHeaders(req *http.Request, method, name string) {
+	req.Header.Set(HeaderMCPProtocolVersion, StreamableProtocolVersion)
+	req.Header.Set(HeaderMCPMethod, method)
+	if name != "" {
+		req.Header.Set(HeaderMCPName, name)
+	}
+}
+
 func TestStreamableHandler_Initialize(t *testing.T) {
 	handler, _ := setupStreamableHandler(t)
 
@@ -81,8 +95,146 @@ func TestStreamableHandler_Initialize(t *testing.T) {
 		t.Fatalf("failed to parse result: %v", err)
 	}
 
-	if result.ProtocolVersion != StreamableProtocolVersion {
-		t.Errorf("expected protocol version %s, got %s", StreamableProtocolVersion, result.ProtocolVersion)
+	if result.ProtocolVersion != "2025-06-18" {
+		t.Errorf("expected negotiated protocol version %s, got %s", "2025-06-18", result.ProtocolVersion)
+	}
+}
+
+func TestStreamableHandler_LatestProtocolIsStateless(t *testing.T) {
+	handler, server := setupStreamableHandler(t)
+	server.plugins = &plugin.Config{Tools: map[string]*plugin.Tool{
+		"echo": {
+			Name: "echo", Command: "echo", AllowedArgGlobs: []string{"**"},
+			InputSchema: map[string]interface{}{"oneOf": []interface{}{map[string]interface{}{"required": []interface{}{"args"}}}},
+		},
+	}}
+	req := &Request{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage(`1`),
+		Method:  "tools/list",
+		Params:  json.RawMessage(`{` + statelessMetaJSON + `}`),
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("encode request: %v", err)
+	}
+	w := httptest.NewRecorder()
+	httpRequest := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
+	setStatelessHeaders(httpRequest, "tools/list", "")
+	handler.HandlePost(w, httpRequest)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var response Response
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Error != nil {
+		t.Fatalf("unexpected error: %+v", response.Error)
+	}
+	if got := w.Header().Get(HeaderMcpSessionID); got != "" {
+		t.Fatalf("stateless response unexpectedly returned session ID %q", got)
+	}
+	result, ok := response.Result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected result object, got %T", response.Result)
+	}
+	if result["ttlMs"] != float64(0) || result["cacheScope"] != "private" {
+		t.Fatalf("expected stateless caching hints, got %#v", result)
+	}
+	tools, ok := result["tools"].([]interface{})
+	if !ok || len(tools) != 1 {
+		t.Fatalf("expected one tool, got %#v", result["tools"])
+	}
+	schema := tools[0].(map[string]interface{})["inputSchema"].(map[string]interface{})
+	if got := schema["$schema"]; got != "https://json-schema.org/draft/2020-12/schema" {
+		t.Fatalf("expected JSON Schema 2020-12 dialect, got %v", got)
+	}
+	if _, ok := schema["oneOf"]; !ok {
+		t.Fatalf("expected custom JSON Schema 2020-12 keyword, got %#v", schema)
+	}
+}
+
+func TestStreamableHandler_LatestProtocolRejectsInitialize(t *testing.T) {
+	handler, _ := setupStreamableHandler(t)
+	body := bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{` + statelessMetaJSON + `}}`)
+	req := httptest.NewRequest(http.MethodPost, "/mcp", body)
+	setStatelessHeaders(req, "initialize", "")
+	w := httptest.NewRecorder()
+	handler.HandlePost(w, req)
+
+	var response Response
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Error == nil || response.Error.Code != MethodNotFound {
+		t.Fatalf("expected method-not-found error, got %+v", response.Error)
+	}
+}
+
+func TestStreamableHandler_LatestProtocolValidatesRoutingHeaders(t *testing.T) {
+	handler, _ := setupStreamableHandler(t)
+	body := bytes.NewBufferString(`{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"echo",` + statelessMetaJSON + `}}`)
+	req := httptest.NewRequest(http.MethodPost, "/mcp", body)
+	req.Header.Set(HeaderMCPProtocolVersion, StreamableProtocolVersion)
+	req.Header.Set(HeaderMCPMethod, "tools/list")
+	w := httptest.NewRecorder()
+	handler.HandlePost(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", w.Code, w.Body.String())
+	}
+	var response Response
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Error == nil || response.Error.Code != HeaderMismatchCode {
+		t.Fatalf("expected header mismatch error, got %+v", response.Error)
+	}
+}
+
+func TestStreamableHandler_LatestProtocolDiscover(t *testing.T) {
+	handler, _ := setupStreamableHandler(t)
+	body := bytes.NewBufferString(`{"jsonrpc":"2.0","id":"discover","method":"server/discover","params":{` + statelessMetaJSON + `}}`)
+	req := httptest.NewRequest(http.MethodPost, "/mcp", body)
+	setStatelessHeaders(req, "server/discover", "")
+	w := httptest.NewRecorder()
+	handler.HandlePost(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var response Response
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	result := response.Result.(map[string]interface{})
+	if result["resultType"] != "complete" {
+		t.Fatalf("expected complete discovery result, got %#v", result)
+	}
+	versions := result["supportedVersions"].([]interface{})
+	if len(versions) == 0 || versions[0] != StreamableProtocolVersion {
+		t.Fatalf("expected latest supported version first, got %#v", versions)
+	}
+}
+
+func TestStreamableHandler_LatestProtocolHasNoSessionEndpoints(t *testing.T) {
+	handler, _ := setupStreamableHandler(t)
+	for _, method := range []string{http.MethodGet, http.MethodDelete} {
+		t.Run(method, func(t *testing.T) {
+			req := httptest.NewRequest(method, "/mcp", nil)
+			req.Header.Set(HeaderMCPProtocolVersion, StreamableProtocolVersion)
+			w := httptest.NewRecorder()
+			if method == http.MethodGet {
+				handler.HandleGet(w, req)
+			} else {
+				handler.HandleDelete(w, req)
+			}
+			if w.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("expected status 405, got %d: %s", w.Code, w.Body.String())
+			}
+		})
 	}
 }
 
@@ -123,7 +275,7 @@ func TestStreamableHandler_ToolsList(t *testing.T) {
 	listReqHTTP.Header.Set("Content-Type", "application/json")
 	listReqHTTP.Header.Set("Accept", "application/json")
 	listReqHTTP.Header.Set(HeaderMcpSessionID, sessionID)
-	listReqHTTP.Header.Set(HeaderMCPProtocolVersion, StreamableProtocolVersion)
+	listReqHTTP.Header.Set(HeaderMCPProtocolVersion, "2025-06-18")
 
 	listW := httptest.NewRecorder()
 	handler.HandlePost(listW, listReqHTTP)
@@ -502,7 +654,7 @@ func TestStreamableHandler_SSE_Broadcast(t *testing.T) {
 	sseReq := httptest.NewRequest("GET", "/mcp", nil).WithContext(ctx)
 	sseReq.Header.Set("Accept", "text/event-stream")
 	sseReq.Header.Set(HeaderMcpSessionID, sessionID)
-	sseReq.Header.Set(HeaderMCPProtocolVersion, StreamableProtocolVersion)
+	sseReq.Header.Set(HeaderMCPProtocolVersion, "2025-06-18")
 
 	done := make(chan struct{})
 	go func() {

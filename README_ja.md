@@ -2,7 +2,7 @@
 
 [![Go](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![MCP](https://img.shields.io/badge/MCP-2025--11-green)](https://modelcontextprotocol.io/)
+[![MCP](https://img.shields.io/badge/MCP-2026--07--28-green)](https://modelcontextprotocol.io/)
 
 AIアシスタントが安全にシェルコマンドを実行できるようにする、セキュリティ重視のMCP（Model Context Protocol）ゲートウェイです。
 
@@ -11,7 +11,7 @@ AIアシスタントが安全にシェルコマンドを実行できるように
 - **セキュリティファースト**: ポリシーベースの引数検証、環境変数フィルタリング、サンドボックス（bubblewrap/WASM）による多層防御
 - **柔軟なデプロイ**: Claude Desktop向けstdioサーバー、Webサービス向けHTTP API、既存MCPサーバー向けブリッジプロキシとして動作
 - **Bridgeモード**: stdio MCPサーバー（Playwright、filesystem等）を認証・レート制限・大容量レスポンス対応付きでHTTP公開
-- **OAuth 2.0対応**: クライアントクレデンシャルフローによるM2M認証（[MCP SEP-1046](https://github.com/modelcontextprotocol/ext-auth)）
+- **OAuth 2.0対応**: MCPクライアント向けAuthorization Code + PKCE
 - **プラグインアーキテクチャ**: GlobパターンでシンプルなJSON定義によるツール設定
 - **リッチUI対応**: MCP Appsによるコマンド出力のインタラクティブHTML表示
 
@@ -32,7 +32,7 @@ AIアシスタントが安全にシェルコマンドを実行できるように
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
 │  │  認証 & レート制限                                                  │   │
 │  │  ├─ APIキー: シンプルなBearerトークン認証                           │   │
-│  │  └─ OAuth 2.0: クライアントクレデンシャルフロー（M2M）              │   │
+│  │  └─ OAuth 2.0: Authorization Code + PKCE                            │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                                     ↓                                       │
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
@@ -91,8 +91,8 @@ AIアシスタントが安全にシェルコマンドを実行できるように
 - **JSONプラグイン設定**: シンプルなJSONファイルでツールを定義
 - **柔軟なサンドボックス**: none, bubblewrap, WASM分離
 - **ポリシーベースのアクセス制御**: Globパターンによる引数検証
-- **OAuth 2.0認証**: M2M通信向けクライアントクレデンシャルフロー
-- **MCP Streamable HTTP**: SSEストリーミング付きセッションベースプロトコル（2025-06-18）
+- **OAuth 2.0認証**: PKCE必須のAuthorization Codeフロー
+- **MCP Streamable HTTP**: SSEストリーミング付きセッションベースプロトコル（2026-07-28）
 - **TUI管理ツール**: ターミナルUIでOAuthクライアントを管理
 - **オプションの監査ログ**: 全モード対応のSQLiteログ
 - **大容量レスポンス対応**: bridgeモードでの自動ファイル外部化
@@ -249,7 +249,8 @@ plugins/
       "sandbox": "none|bubblewrap|wasm",
       "wasm_binary": "/path/to/binary.wasm",
       "ui_type": "log|table|json",
-      "ui_template": "templates/custom.html"
+      "ui_template": "templates/custom.html",
+      "input_schema": {"oneOf": [{"required": ["args"]}]}
     }
   ],
   "allowed_env_keys": ["PATH", "HOME", "CUSTOM_*"]
@@ -267,6 +268,7 @@ plugins/
 | `wasm_binary` | Yes* | WASMバイナリのパス（*sandbox=wasmの場合必須） |
 | `ui_type` | No | 組み込みUI: `table`, `json`, `log` |
 | `ui_template` | No | カスタムHTMLテンプレートのパス（plugin.jsonからの相対パス） |
+| `input_schema` | No | 生成されるTool入力SchemaへマージするJSON Schema Draft 2020-12の追加キーワード |
 
 **注意**: テンプレートパスはplugin.jsonファイルの場所からの相対パスです。セキュリティのため親ディレクトリ参照（`..`）は許可されません。
 
@@ -280,8 +282,10 @@ plugins/
 | `--plugins-dir` | - | プラグインディレクトリ/ファイルを含むディレクトリ |
 | `--api-key` | - | 認証用APIキー（または `MCP_GATEKEEPER_API_KEY` 環境変数） |
 | `--db` | - | 監査ログ・OAuth用SQLiteデータベースパス（オプション） |
-| `--enable-oauth` | `false` | OAuth 2.0認証を有効化（`--db`必須） |
+| `--enable-oauth` | `false` | OAuth 2.0 Authorization Code認証を有効化（`--db`と`--oauth-htpasswd`が必須） |
 | `--oauth-issuer` | - | OAuth発行者URL（省略時は自動検出） |
+| `--oauth-resource` | - | 保護対象リソースURL（省略時は`<issuer>/mcp`） |
+| `--oauth-htpasswd` | - | OAuthユーザーログインに使用するbcrypt htpasswdファイル |
 | `--addr` | `:8080` | HTTPリッスンアドレス（http/bridge） |
 | `--rate-limit` | `500` | 1分あたりの最大リクエスト数（http/bridge） |
 | `--upstream` | - | 上流MCPサーバーコマンド（bridgeで必須） |
@@ -289,7 +293,7 @@ plugins/
 | `--max-response-size` | `500000` | 最大レスポンスサイズ（バイト、bridge） |
 | `--debug` | `false` | デバッグログ有効化（bridge） |
 | `--wasm-dir` | - | WASMバイナリ格納ディレクトリ |
-| `--enable-streamable` | `false` | MCP Streamable HTTP（2025-06-18）を有効化 |
+| `--enable-streamable` | `false` | MCP Streamable HTTP（2026-07-28）を有効化 |
 | `--session-ttl` | `30m` | Streamable HTTPのセッションTTL |
 
 ## 監査ログ
@@ -320,20 +324,28 @@ sqlite3 audit.db "SELECT mode, method, tool_name, duration_ms FROM audit_logs OR
 
 ## OAuth 2.0認証
 
-MCP GatekeeperはM2M（マシン間）認証向けのOAuth 2.0クライアントクレデンシャルフローをサポートしています。シンプルなAPIキーよりも安全な認証が必要な場合に便利です。
+MCP GatekeeperはMCPクライアント向けのOAuth 2.0 Authorization Codeサーバーを内蔵しています。PKCEの`S256`を必須とし、事前登録した公開クライアントとbcrypt htpasswdによるユーザー認証を使用します。Client Credentialsには対応しません。
 
 ### OAuthの有効化
 
 ```bash
+htpasswd -B -c oauth.htpasswd alice
+chmod 600 oauth.htpasswd
+
 ./mcp-gatekeeper --mode=http \
   --db=gatekeeper.db \
   --enable-oauth \
+  --oauth-issuer=https://mcp.example.com \
+  --oauth-resource=https://mcp.example.com/mcp \
+  --oauth-htpasswd=oauth.htpasswd \
   --addr=:8080 \
   --plugins-dir=plugins/ \
   --root-dir=/path/to/root
 ```
 
-**注意**: OAuthはクライアントクレデンシャルとトークンを保存するため`--db`が必須です。
+bcryptハッシュ（`htpasswd -B`）のみ使用できます。パスワードファイルは通常ファイルで、グループおよびその他ユーザーの読み書き権限を外してください。登録クライアント、認可コード、トークンの保存には`--db`も必要です。
+
+リバースプロキシ構成では、`--oauth-issuer`に公開Authorization Server URLを設定してください。保護対象リソースはデフォルトで`<issuer>/mcp`になります。MCPエンドポイントの公開URLが異なる場合は`--oauth-resource`を指定します。
 
 ### OAuthクライアントの作成
 
@@ -343,47 +355,32 @@ TUI管理ツールを使用してOAuthクライアントを作成します：
 ./mcp-gatekeeper-admin --db=gatekeeper.db
 ```
 
-「OAuth Clients」→「New Client」→クライアントIDを入力→生成されたクライアントシークレットを保存。
+「OAuth Clients」→「New Client」を選び、次の情報を入力します：
 
-### OAuthフロー（クライアントクレデンシャル）
+1. クライアントID。
+2. カンマ区切りの正確なリダイレクトURI。HTTPループバックURI以外はHTTPSが必須です。
+3. スペース区切りのスコープ。`mcp`スコープが必須です。
 
-```bash
-# 1. アクセストークン取得
-curl -X POST http://localhost:8080/oauth/token \
-  -d "grant_type=client_credentials&client_id=myclient&client_secret=SECRET"
+クライアントは公開クライアントで、クライアントシークレットはありません。
 
-# レスポンス:
-# {
-#   "access_token": "...",
-#   "token_type": "Bearer",
-#   "expires_in": 3600,
-#   "refresh_token": "..."
-# }
+### OAuthフロー（Authorization Code + PKCE）
 
-# 2. MCPエンドポイント呼び出し
-curl -X POST http://localhost:8080/mcp \
-  -H "Authorization: Bearer ACCESS_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+MCPクライアントはwell-knownメタデータから認可サーバーを検出し、次の手順を実行します：
 
-# 3. トークンリフレッシュ（アクセストークン期限切れ時）
-curl -X POST http://localhost:8080/oauth/token \
-  -d "grant_type=refresh_token&refresh_token=REFRESH_TOKEN&client_id=myclient&client_secret=SECRET"
-```
+1. PKCE verifierと`S256` challengeを生成します。
+2. `response_type=code`、登録済みの`client_id`と`redirect_uri`、`scope=mcp`、`resource=<公開ベースURL>/mcp`、`state`、PKCE challengeを付けて`/oauth/authorize`を開きます。
+3. ユーザーがログインして認可すると、登録済みURIへ認可コードが返されます。
+4. `/oauth/token`へ`grant_type=authorization_code`、`client_id`、同一の`redirect_uri`、`code_verifier`を送り、コードを交換します。
+5. 返されたBearerアクセストークンを`/mcp`で使用します。リフレッシュ時は`grant_type=refresh_token`、`client_id`、同じ`resource`を送り、トークンをローテーションします。
 
-HTTP Basic 認証でクライアント認証することもできます:
-
-```bash
-curl -X POST http://localhost:8080/oauth/token \
-  -H "Authorization: Basic BASE64(client_id:client_secret)" \
-  -d "grant_type=client_credentials"
-```
+認可コードは1回だけ使用でき、クライアント、リダイレクトURI、リソース、スコープ、PKCE challengeに紐付きます。アクセストークンとリフレッシュトークンは不透明で、リソースに紐付きます。
 
 ### OAuthエンドポイント
 
 | エンドポイント | 説明 |
 |---------------|------|
-| `POST /oauth/token` | トークンエンドポイント（client_credentials, refresh_token） |
+| `GET, POST /oauth/authorize` | ユーザーログイン、同意、認可コードエンドポイント |
+| `POST /oauth/token` | トークンエンドポイント（`authorization_code`, `refresh_token`） |
 | `GET /.well-known/oauth-authorization-server` | OAuthサーバーメタデータ |
 | `GET /.well-known/openid-configuration` | OpenID Connectディスカバリ |
 | `GET /.well-known/oauth-protected-resource` | 保護リソースメタデータ (RFC 9728) |
@@ -393,8 +390,9 @@ curl -X POST http://localhost:8080/oauth/token \
 
 | トークン | 有効期限 |
 |---------|---------|
+| 認可コード | 5分、1回のみ使用可能 |
 | アクセストークン | 1時間 |
-| リフレッシュトークン | 無期限（クライアント無効化まで） |
+| リフレッシュトークン | 使用、ローテーション、またはクライアント無効化まで |
 
 ### 二重認証
 
@@ -440,7 +438,10 @@ go install github.com/takeshy/mcp-gatekeeper/cmd/admin@latest
 
 ## MCP Streamable HTTP
 
-MCP GatekeeperはMCP Streamable HTTPトランスポート（プロトコルバージョン2025-06-18）をサポートしており、SSEストリーミング付きのセッションベース通信が可能です。
+MCP GatekeeperはステートレスなMCP HTTPトランスポート（プロトコルバージョン2026-07-28）をサポートし、旧クライアント向けにはセッションベースのStreamable HTTPも維持しています。
+既存クライアント向けに`2025-06-18`および`2024-11-05`も引き続きサポートし、初期化時に選択されたバージョンをレスポンスに返します。
+
+`2026-07-28`モードでは、初期化、セッション、Roots、Sampling、プロトコルLoggingを公開・処理しません。テレメトリにはOpenTelemetryや実行環境のログサービスを利用してください。旧実装は、以前のプロトコルバージョンを使用するリクエストに限定して維持されます。
 
 ### Streamable HTTPの有効化
 
@@ -463,50 +464,25 @@ MCP GatekeeperはMCP Streamable HTTPトランスポート（プロトコルバ�
 
 ### エンドポイント
 
-| メソッド | エンドポイント | 説明 |
-|----------|---------------|------|
-| POST | `/mcp` | JSON-RPCリクエスト/通知を送信 |
-| GET | `/mcp` | サーバー→クライアント通知用SSEストリームを開く |
-| DELETE | `/mcp` | セッションを終了 |
+MCP `2026-07-28`では、ステートレスな`POST /mcp`のみを使用します。`initialize`、`Mcp-Session-Id`、SSEの`GET`、セッション削除の`DELETE`はこのバージョンには含まれません。`2025-06-18`または`2024-11-05`を利用する既存クライアントでは、従来のステートフルなPOST/GET/DELETEフローを引き続き使用できます。
 
-### プロトコルフロー
+### ステートレスプロトコルフロー（2026-07-28）
+
+必要なCapabilityはリクエストごとに指定でき、初期化ハンドシェイクやセッションアフィニティは不要です。
 
 ```bash
-# 1. 初期化（セッション作成）
 curl -X POST http://localhost:8080/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
-
-# レスポンスにMcp-Session-Idヘッダーが含まれる
-# Mcp-Session-Id: 550e8400-e29b-41d4-a716-446655440000
-
-# 2. 後続リクエストにセッションIDを含める
-curl -X POST http://localhost:8080/mcp \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json" \
-  -H "Mcp-Session-Id: 550e8400-e29b-41d4-a716-446655440000" \
-  -H "MCP-Protocol-Version: 2025-06-18" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
-
-# 3. サーバー通知用SSEストリームを開く
-curl -N http://localhost:8080/mcp \
-  -H "Accept: text/event-stream" \
-  -H "Mcp-Session-Id: 550e8400-e29b-41d4-a716-446655440000" \
-  -H "MCP-Protocol-Version: 2025-06-18"
-
-# 4. セッション終了
-curl -X DELETE http://localhost:8080/mcp \
-  -H "Mcp-Session-Id: 550e8400-e29b-41d4-a716-446655440000"
+  -H "MCP-Protocol-Version: 2026-07-28" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"capabilities":{}}}'
 ```
+
+Toolの入力SchemaはJSON Schema Draft 2020-12を明示します。MCP AppsはToolおよびResourceの`_meta.ui`メタデータを通じて引き続き利用できます。詳細は[MCP Apps（インタラクティブUI）](#mcp-appsインタラクティブui)を参照してください。
 
 ### BridgeモードでのStreamable HTTP
 
-`--enable-streamable`を指定したbridgeモードでは、各セッションが独自のupstream MCPサーバープロセスを作成します。これによりセッション間の完全な分離が実現されます：
-
-- 各`initialize`リクエストで新しいupstreamプロセスが起動
-- セッション状態はクライアント間で共有されない
-- セッションの期限切れまたは削除時にupstreamプロセスが終了
+bridgeモードでは、MCP `2026-07-28`の各リクエストをリクエスト単位のupstreamプロセスへ転送し、レスポンス後に終了するため、bridge側にクライアントセッションは残りません。旧プロトコルでは、引き続きセッションごとに分離したupstreamプロセスを作成し、セッションの期限切れまたは削除時に終了します。
 
 ## Bridgeモードの機能
 

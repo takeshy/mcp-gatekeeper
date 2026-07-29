@@ -11,10 +11,11 @@ import (
 
 	"github.com/takeshy/mcp-gatekeeper/internal/mcp/session"
 	"github.com/takeshy/mcp-gatekeeper/internal/mcp/sse"
+	"github.com/takeshy/mcp-gatekeeper/internal/version"
 )
 
 // MCP Streamable HTTP protocol version
-const StreamableProtocolVersion = "2025-06-18"
+const StreamableProtocolVersion = version.MCPStreamableProtocolVersion
 
 // HTTP headers for MCP Streamable HTTP
 const (
@@ -24,8 +25,8 @@ const (
 
 // StreamableHandler handles MCP Streamable HTTP requests
 type StreamableHandler struct {
-	httpServer     *HTTPServer
-	sessionManager *session.Manager
+	httpServer        *HTTPServer
+	sessionManager    *session.Manager
 	heartbeatInterval time.Duration
 }
 
@@ -70,7 +71,13 @@ func (h *StreamableHandler) HandlePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Handle initialize request - creates a new session
+	protocolVersion := r.Header.Get(HeaderMCPProtocolVersion)
+	if protocolVersion == StreamableProtocolVersion {
+		h.handleStatelessPost(w, r, &req)
+		return
+	}
+
+	// Older protocol versions use the legacy stateful initialization flow.
 	if req.Method == "initialize" {
 		h.handleInitialize(w, r, &req)
 		return
@@ -90,10 +97,10 @@ func (h *StreamableHandler) HandlePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate MCP-Protocol-Version header for non-initialize requests
-	protocolVersion := r.Header.Get(HeaderMCPProtocolVersion)
-	if protocolVersion != "" && protocolVersion != StreamableProtocolVersion && protocolVersion != ProtocolVersion {
+	protocolVersion = r.Header.Get(HeaderMCPProtocolVersion)
+	if protocolVersion != "" && protocolVersion != sess.ProtocolVersion {
 		h.writeHTTPError(w, http.StatusBadRequest,
-			fmt.Sprintf("unsupported protocol version: expected %s, got %s", StreamableProtocolVersion, protocolVersion))
+			fmt.Sprintf("unsupported protocol version: expected %s, got %s", sess.ProtocolVersion, protocolVersion))
 		return
 	}
 
@@ -127,6 +134,44 @@ func (h *StreamableHandler) HandlePost(w http.ResponseWriter, r *http.Request) {
 	h.writeJSONRPC(w, sess, resp)
 }
 
+// handleStatelessPost handles MCP 2026-07-28 requests without initialization or sessions.
+func (h *StreamableHandler) handleStatelessPost(w http.ResponseWriter, r *http.Request, req *Request) {
+	if err := validateStatelessRequest(r, req); err != nil {
+		h.writeJSONRPCStatus(w, http.StatusBadRequest, NewErrorResponse(req.ID, HeaderMismatchCode, "Invalid MCP request headers or metadata", err.Error()))
+		return
+	}
+
+	if req.Method == "initialize" || req.Method == "notifications/initialized" {
+		h.writeJSONRPC(w, nil, NewErrorResponse(req.ID, MethodNotFound, "Method not found", req.Method))
+		return
+	}
+
+	if req.ID == nil || string(req.ID) == "null" {
+		h.handleNotification(req, nil)
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+
+	var resp *Response
+	switch req.Method {
+	case "server/discover":
+		resp = NewResponse(req.ID, discoverResult(h.httpServer.hasUIEnabledTools(), nil))
+	case "tools/list":
+		resp = h.httpServer.handleMCPToolsList(req)
+	case "tools/call":
+		resp = h.httpServer.handleMCPToolsCall(r.Context(), req)
+	case "resources/list":
+		resp = h.httpServer.handleMCPResourcesList(req)
+	case "resources/read":
+		resp = h.httpServer.handleMCPResourcesRead(req, "")
+	case "ping":
+		resp = NewResponse(req.ID, struct{}{})
+	default:
+		resp = NewErrorResponse(req.ID, MethodNotFound, "Method not found", req.Method)
+	}
+	h.writeJSONRPC(w, nil, resp)
+}
+
 // handleInitialize handles the initialize request
 func (h *StreamableHandler) handleInitialize(w http.ResponseWriter, r *http.Request, req *Request) {
 	var params InitializeParams
@@ -134,9 +179,13 @@ func (h *StreamableHandler) handleInitialize(w http.ResponseWriter, r *http.Requ
 		h.writeJSONRPC(w, nil, NewErrorResponse(req.ID, InvalidParams, "Invalid params", err.Error()))
 		return
 	}
+	if params.ProtocolVersion == StreamableProtocolVersion {
+		h.writeJSONRPC(w, nil, NewErrorResponse(req.ID, MethodNotFound, "Method not found", req.Method))
+		return
+	}
 
 	// Validate client protocol version
-	if params.ProtocolVersion != StreamableProtocolVersion && params.ProtocolVersion != ProtocolVersion {
+	if !version.IsMCPProtocolVersionSupported(params.ProtocolVersion) {
 		h.writeJSONRPC(w, nil, NewErrorResponse(req.ID, InvalidRequest, "Unsupported protocol version",
 			fmt.Sprintf("expected %s, got %s", StreamableProtocolVersion, params.ProtocolVersion)))
 		return
@@ -144,6 +193,7 @@ func (h *StreamableHandler) handleInitialize(w http.ResponseWriter, r *http.Requ
 
 	// Create a new session
 	sess := h.sessionManager.Create()
+	sess.ProtocolVersion = params.ProtocolVersion
 
 	// Build capabilities
 	caps := ServerCapabilities{
@@ -157,12 +207,6 @@ func (h *StreamableHandler) handleInitialize(w http.ResponseWriter, r *http.Requ
 		caps.Resources = &ResourcesCapability{
 			Subscribe:   false,
 			ListChanged: false,
-		}
-	}
-
-	if h.httpServer.oauthHandler != nil {
-		caps.Extensions = map[string]map[string]interface{}{
-			"io.modelcontextprotocol/oauth-client-credentials": {},
 		}
 	}
 
@@ -196,6 +240,10 @@ func (h *StreamableHandler) handleNotification(req *Request, sess *session.Sessi
 
 // HandleGet handles GET /mcp requests (SSE stream)
 func (h *StreamableHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get(HeaderMCPProtocolVersion) == StreamableProtocolVersion {
+		h.writeHTTPError(w, http.StatusMethodNotAllowed, "MCP 2026-07-28 is stateless and does not provide an SSE session stream")
+		return
+	}
 	// Check Accept header
 	accept := r.Header.Get("Accept")
 	if !h.acceptsSSE(accept) {
@@ -218,9 +266,9 @@ func (h *StreamableHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
 
 	// Validate MCP-Protocol-Version header
 	protocolVersion := r.Header.Get(HeaderMCPProtocolVersion)
-	if protocolVersion != "" && protocolVersion != StreamableProtocolVersion {
+	if protocolVersion != "" && protocolVersion != sess.ProtocolVersion {
 		h.writeHTTPError(w, http.StatusBadRequest,
-			fmt.Sprintf("unsupported protocol version: expected %s, got %s", StreamableProtocolVersion, protocolVersion))
+			fmt.Sprintf("unsupported protocol version: expected %s, got %s", sess.ProtocolVersion, protocolVersion))
 		return
 	}
 
@@ -274,24 +322,31 @@ func (h *StreamableHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
 
 // HandleDelete handles DELETE /mcp requests (terminate session)
 func (h *StreamableHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get(HeaderMCPProtocolVersion) == StreamableProtocolVersion {
+		h.writeHTTPError(w, http.StatusMethodNotAllowed, "MCP 2026-07-28 is stateless and has no session to delete")
+		return
+	}
 	sessionID := r.Header.Get(HeaderMcpSessionID)
 	if sessionID == "" {
 		h.writeHTTPError(w, http.StatusBadRequest, "missing Mcp-Session-Id header")
 		return
 	}
 
-	// Validate MCP-Protocol-Version header if present
-	protocolVersion := r.Header.Get(HeaderMCPProtocolVersion)
-	if protocolVersion != "" && protocolVersion != StreamableProtocolVersion {
-		h.writeHTTPError(w, http.StatusBadRequest,
-			fmt.Sprintf("unsupported protocol version: expected %s, got %s", StreamableProtocolVersion, protocolVersion))
-		return
-	}
-
-	if !h.sessionManager.Delete(sessionID) {
+	sess, ok := h.sessionManager.Get(sessionID)
+	if !ok {
 		h.writeHTTPError(w, http.StatusNotFound, "session not found")
 		return
 	}
+
+	// Validate MCP-Protocol-Version header if present
+	protocolVersion := r.Header.Get(HeaderMCPProtocolVersion)
+	if protocolVersion != "" && protocolVersion != sess.ProtocolVersion {
+		h.writeHTTPError(w, http.StatusBadRequest,
+			fmt.Sprintf("unsupported protocol version: expected %s, got %s", sess.ProtocolVersion, protocolVersion))
+		return
+	}
+
+	h.sessionManager.Delete(sessionID)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -317,8 +372,12 @@ func (h *StreamableHandler) acceptsSSE(accept string) bool {
 
 // writeJSONRPC writes a JSON-RPC response
 func (h *StreamableHandler) writeJSONRPC(w http.ResponseWriter, sess *session.Session, resp *Response) {
+	h.writeJSONRPCStatus(w, http.StatusOK, resp)
+}
+
+func (h *StreamableHandler) writeJSONRPCStatus(w http.ResponseWriter, status int, resp *Response) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(resp)
 }
 

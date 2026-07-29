@@ -22,23 +22,25 @@ import (
 
 func main() {
 	var (
-		showVersion     = flag.Bool("version", false, "Show version and exit")
-		mode            = flag.String("mode", "stdio", "Server mode: stdio, http, or bridge")
-		addr            = flag.String("addr", ":8080", "HTTP server address (for http/bridge mode)")
-		apiKey          = flag.String("api-key", "", "API key for authentication (or MCP_GATEKEEPER_API_KEY env var)")
-		rateLimit       = flag.Int("rate-limit", 500, "Rate limit per minute (for http/bridge mode)")
-		rootDir         = flag.String("root-dir", "", "Root directory for command execution (required for stdio/http, acts as chroot)")
-		wasmDir         = flag.String("wasm-dir", "", "Directory containing WASM binaries (mounted as /.wasm in WASM sandbox)")
-		pluginsDir      = flag.String("plugins-dir", "", "Directory containing plugin JSON files (required for stdio/http)")
-		pluginFile      = flag.String("plugin-file", "", "Single plugin JSON file (alternative to plugins-dir)")
-		upstream        = flag.String("upstream", "", "Upstream stdio MCP server command (for bridge mode, e.g., 'node /path/to/server.js')")
-		upstreamEnv     = flag.String("upstream-env", "", "Comma-separated environment variables for upstream server (e.g., 'KEY1=val1,KEY2=val2')")
-		maxResponseSize = flag.Int("max-response-size", 500000, "Max response size in bytes for bridge mode (default 500000)")
-		debug           = flag.Bool("debug", false, "Enable debug logging (logs request/response for bridge mode)")
+		showVersion      = flag.Bool("version", false, "Show version and exit")
+		mode             = flag.String("mode", "stdio", "Server mode: stdio, http, or bridge")
+		addr             = flag.String("addr", ":8080", "HTTP server address (for http/bridge mode)")
+		apiKey           = flag.String("api-key", "", "API key for authentication (or MCP_GATEKEEPER_API_KEY env var)")
+		rateLimit        = flag.Int("rate-limit", 500, "Rate limit per minute (for http/bridge mode)")
+		rootDir          = flag.String("root-dir", "", "Root directory for command execution (required for stdio/http, acts as chroot)")
+		wasmDir          = flag.String("wasm-dir", "", "Directory containing WASM binaries (mounted as /.wasm in WASM sandbox)")
+		pluginsDir       = flag.String("plugins-dir", "", "Directory containing plugin JSON files (required for stdio/http)")
+		pluginFile       = flag.String("plugin-file", "", "Single plugin JSON file (alternative to plugins-dir)")
+		upstream         = flag.String("upstream", "", "Upstream stdio MCP server command (for bridge mode, e.g., 'node /path/to/server.js')")
+		upstreamEnv      = flag.String("upstream-env", "", "Comma-separated environment variables for upstream server (e.g., 'KEY1=val1,KEY2=val2')")
+		maxResponseSize  = flag.Int("max-response-size", 500000, "Max response size in bytes for bridge mode (default 500000)")
+		debug            = flag.Bool("debug", false, "Enable debug logging (logs request/response for bridge mode)")
 		dbPath           = flag.String("db", "", "SQLite database path for audit logging (optional)")
 		enableOAuth      = flag.Bool("enable-oauth", false, "Enable OAuth 2.0 authentication (requires --db)")
 		oauthIssuer      = flag.String("oauth-issuer", "", "OAuth issuer URL (optional, auto-detected if empty)")
-		enableStreamable = flag.Bool("enable-streamable", false, "Enable MCP Streamable HTTP (2025-06-18)")
+		oauthResource    = flag.String("oauth-resource", "", "OAuth protected resource URL (optional, defaults to issuer + /mcp)")
+		oauthHTPasswd    = flag.String("oauth-htpasswd", "", "bcrypt htpasswd file for OAuth Authorization Code login")
+		enableStreamable = flag.Bool("enable-streamable", false, "Enable MCP Streamable HTTP (2026-07-28)")
 		sessionTTL       = flag.Duration("session-ttl", 30*time.Minute, "Session TTL for Streamable HTTP")
 	)
 	flag.Parse()
@@ -77,6 +79,21 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: --enable-oauth requires --db to be specified\n")
 		os.Exit(1)
 	}
+	if *enableOAuth && *oauthHTPasswd == "" {
+		fmt.Fprintf(os.Stderr, "Error: --enable-oauth requires --oauth-htpasswd\n")
+		os.Exit(1)
+	}
+	if *enableOAuth {
+		info, err := os.Stat(*oauthHTPasswd)
+		if err != nil || !info.Mode().IsRegular() {
+			fmt.Fprintf(os.Stderr, "Error: --oauth-htpasswd must reference a regular file\n")
+			os.Exit(1)
+		}
+		if info.Mode().Perm()&0077 != 0 {
+			fmt.Fprintf(os.Stderr, "Error: --oauth-htpasswd must not be accessible by group or others (use chmod 600)\n")
+			os.Exit(1)
+		}
+	}
 
 	// Open database if specified (optional for audit logging, required for OAuth)
 	var database *db.DB
@@ -108,7 +125,7 @@ func main() {
 			upstreamEnvVars = strings.Split(*upstreamEnv, ",")
 		}
 
-		if err := runBridge(*addr, *upstream, upstreamEnvVars, *apiKey, *rateLimit, *maxResponseSize, *debug, database, *enableOAuth, *oauthIssuer, *enableStreamable, *sessionTTL); err != nil {
+		if err := runBridge(*addr, *upstream, upstreamEnvVars, *apiKey, *rateLimit, *maxResponseSize, *debug, database, *enableOAuth, *oauthIssuer, *oauthResource, *oauthHTPasswd, *enableStreamable, *sessionTTL); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -219,7 +236,7 @@ func main() {
 			os.Exit(1)
 		}
 	case "http":
-		if err := runHTTP(plugins, *addr, *rateLimit, rootDirAbs, wasmDirAbs, *apiKey, database, *enableOAuth, *oauthIssuer, *enableStreamable, *sessionTTL); err != nil {
+		if err := runHTTP(plugins, *addr, *rateLimit, rootDirAbs, wasmDirAbs, *apiKey, database, *enableOAuth, *oauthIssuer, *oauthResource, *oauthHTPasswd, *enableStreamable, *sessionTTL); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			if sandboxExecutor != nil {
 				sandboxExecutor.Cleanup()
@@ -262,7 +279,7 @@ func runStdio(plugins *plugin.Config, apiKey string, rootDir string, wasmDir str
 	return server.Run(ctx)
 }
 
-func runHTTP(plugins *plugin.Config, addr string, rateLimit int, rootDir string, wasmDir string, apiKey string, database *db.DB, enableOAuth bool, oauthIssuer string, enableStreamable bool, sessionTTL time.Duration) error {
+func runHTTP(plugins *plugin.Config, addr string, rateLimit int, rootDir string, wasmDir string, apiKey string, database *db.DB, enableOAuth bool, oauthIssuer, oauthResource, oauthHTPasswd string, enableStreamable bool, sessionTTL time.Duration) error {
 	config := &mcp.HTTPConfig{
 		RateLimit:        rateLimit,
 		RateLimitWindow:  time.Minute,
@@ -272,6 +289,8 @@ func runHTTP(plugins *plugin.Config, addr string, rateLimit int, rootDir string,
 		DB:               database,
 		EnableOAuth:      enableOAuth,
 		OAuthIssuer:      oauthIssuer,
+		OAuthResource:    oauthResource,
+		OAuthHTPasswd:    oauthHTPasswd,
 		EnableStreamable: enableStreamable,
 		SessionTTL:       sessionTTL,
 	}
@@ -326,7 +345,7 @@ func runHTTP(plugins *plugin.Config, addr string, rateLimit int, rootDir string,
 	return nil
 }
 
-func runBridge(addr string, upstream string, upstreamEnv []string, apiKey string, rateLimit int, maxResponseSize int, debug bool, database *db.DB, enableOAuth bool, oauthIssuer string, enableStreamable bool, sessionTTL time.Duration) error {
+func runBridge(addr string, upstream string, upstreamEnv []string, apiKey string, rateLimit int, maxResponseSize int, debug bool, database *db.DB, enableOAuth bool, oauthIssuer, oauthResource, oauthHTPasswd string, enableStreamable bool, sessionTTL time.Duration) error {
 	// Parse upstream command with shell-like syntax support
 	parts, err := bridge.ParseCommand(upstream)
 	if err != nil {
@@ -349,6 +368,8 @@ func runBridge(addr string, upstream string, upstreamEnv []string, apiKey string
 		DB:               database,
 		EnableOAuth:      enableOAuth,
 		OAuthIssuer:      oauthIssuer,
+		OAuthResource:    oauthResource,
+		OAuthHTPasswd:    oauthHTPasswd,
 		EnableStreamable: enableStreamable,
 		SessionTTL:       sessionTTL,
 	}

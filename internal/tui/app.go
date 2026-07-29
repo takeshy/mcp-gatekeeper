@@ -58,19 +58,21 @@ var (
 
 // App represents the TUI application
 type App struct {
-	db            *db.DB
-	screen        Screen
-	cursor        int
-	width         int
-	height        int
-	err           error
-	message       string
-	oauthClients  []*db.OAuthClient
-	selectedClient *db.OAuthClient
-	newClientID   string
-	newClientSecret string
-	inputMode     bool
-	inputValue    string
+	db                 *db.DB
+	screen             Screen
+	cursor             int
+	width              int
+	height             int
+	err                error
+	message            string
+	oauthClients       []*db.OAuthClient
+	selectedClient     *db.OAuthClient
+	newClientID        string
+	newClientRedirects string
+	newClientScopes    string
+	newClientStep      int
+	inputMode          bool
+	inputValue         string
 }
 
 // NewApp creates a new TUI application
@@ -157,26 +159,36 @@ func (a *App) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
 		if a.screen == ScreenOAuthClientNew {
-			// Create new client
-			clientID := strings.TrimSpace(a.inputValue)
-			if clientID == "" {
-				a.err = fmt.Errorf("client ID cannot be empty")
+			value := strings.TrimSpace(a.inputValue)
+			if value == "" {
+				a.err = fmt.Errorf("value cannot be empty")
 				return a, nil
 			}
-			clientSecret, err := a.db.CreateOAuthClient(clientID)
-			if err != nil {
-				a.err = err
-				return a, nil
+			switch a.newClientStep {
+			case 0:
+				a.newClientID = value
+				a.newClientStep = 1
+			case 1:
+				a.newClientRedirects = value
+				a.newClientStep = 2
+			case 2:
+				a.newClientScopes = value
+				redirectURIs := splitAndTrim(a.newClientRedirects, ",")
+				scopes := strings.Fields(a.newClientScopes)
+				if err := a.db.RegisterOAuthPublicClient(a.newClientID, redirectURIs, scopes); err != nil {
+					a.err = err
+					return a, nil
+				}
+				a.inputMode = false
+				a.screen = ScreenOAuthClientCreated
 			}
-			a.newClientID = clientID
-			a.newClientSecret = clientSecret
-			a.inputMode = false
 			a.inputValue = ""
-			a.screen = ScreenOAuthClientCreated
+			a.err = nil
 		}
 	case "esc":
 		a.inputMode = false
 		a.inputValue = ""
+		a.newClientStep = 0
 		a.screen = ScreenOAuthClients
 		a.cursor = 0
 	case "backspace":
@@ -203,6 +215,7 @@ func (a *App) handleEnter() (tea.Model, tea.Cmd) {
 			a.screen = ScreenOAuthClientNew
 			a.inputMode = true
 			a.inputValue = ""
+			a.newClientStep = 0
 			a.err = nil
 			a.message = ""
 		} else if a.cursor == menuOffset+1 {
@@ -391,11 +404,12 @@ func (a *App) viewOAuthClientNew() string {
 		b.WriteString("\n\n")
 	}
 
-	b.WriteString("Enter Client ID:\n\n")
+	prompts := []string{"Enter Client ID:", "Enter redirect URIs (comma-separated):", "Enter allowed scopes (space-separated):"}
+	b.WriteString(prompts[a.newClientStep] + "\n\n")
 	b.WriteString(boxStyle.Render(a.inputValue + "_"))
 	b.WriteString("\n")
 
-	b.WriteString(helpStyle.Render("\n[Enter] Create  [Esc] Cancel"))
+	b.WriteString(helpStyle.Render("\n[Enter] Next/Create  [Esc] Cancel"))
 
 	return b.String()
 }
@@ -409,16 +423,23 @@ func (a *App) viewOAuthClientCreated() string {
 	b.WriteString(successStyle.Render("Client created successfully!"))
 	b.WriteString("\n\n")
 
-	b.WriteString(warningStyle.Render("IMPORTANT: Save the client secret now. It will not be shown again!"))
-	b.WriteString("\n\n")
-
-	content := fmt.Sprintf("Client ID:     %s\nClient Secret: %s", a.newClientID, a.newClientSecret)
+	content := fmt.Sprintf("Client ID: %s\nRedirect URIs: %s\nScopes: %s", a.newClientID, a.newClientRedirects, a.newClientScopes)
 	b.WriteString(boxStyle.Render(content))
 	b.WriteString("\n")
 
 	b.WriteString(helpStyle.Render("\n[Enter] Continue"))
 
 	return b.String()
+}
+
+func splitAndTrim(value, separator string) []string {
+	var result []string
+	for _, item := range strings.Split(value, separator) {
+		if item = strings.TrimSpace(item); item != "" {
+			result = append(result, item)
+		}
+	}
+	return result
 }
 
 func (a *App) viewOAuthClientConfirmDelete() string {

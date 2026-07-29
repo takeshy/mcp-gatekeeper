@@ -15,10 +15,11 @@ import (
 	"github.com/takeshy/mcp-gatekeeper/internal/executor"
 	"github.com/takeshy/mcp-gatekeeper/internal/plugin"
 	"github.com/takeshy/mcp-gatekeeper/internal/policy"
+	"github.com/takeshy/mcp-gatekeeper/internal/version"
 )
 
 const (
-	ProtocolVersion = "2024-11-05"
+	ProtocolVersion = version.MCPProtocolVersion
 	ServerName      = "mcp-gatekeeper"
 	ServerVersion   = "1.0.1"
 )
@@ -114,6 +115,14 @@ func (s *StdioServer) handleMessage(ctx context.Context, data []byte) (*Response
 
 	// Handle notifications (no id)
 	if req.ID == nil || string(req.ID) == "null" {
+		if !s.initialized {
+			if err := validateStatelessMetadata(&req); err != nil {
+				return nil, err
+			}
+			if req.Method == "notifications/initialized" {
+				return nil, fmt.Errorf("%s is not part of MCP %s", req.Method, version.MCPProtocolVersion)
+			}
+		}
 		if err := s.handleNotification(ctx, &req); err != nil {
 			fmt.Fprintf(os.Stderr, "notification error: %v\n", err)
 		}
@@ -141,22 +150,61 @@ func (s *StdioServer) handleRequest(ctx context.Context, req *Request) (*Respons
 	switch req.Method {
 	case "initialize":
 		return s.handleInitialize(req)
+	case "server/discover":
+		if err := validateStatelessMetadata(req); err != nil {
+			return NewErrorResponse(req.ID, UnsupportedProtocolVersionCode, "Invalid MCP request metadata", err.Error()), nil
+		}
+		return NewResponse(req.ID, discoverResult(s.hasUIEnabledTools(), nil)), nil
 	case "tools/list":
+		if err := s.validateOperationalRequest(req); err != nil {
+			return NewErrorResponse(req.ID, UnsupportedProtocolVersionCode, "Invalid MCP request metadata", err.Error()), nil
+		}
 		return s.handleToolsList(req)
 	case "tools/call":
+		if err := s.validateOperationalRequest(req); err != nil {
+			return NewErrorResponse(req.ID, UnsupportedProtocolVersionCode, "Invalid MCP request metadata", err.Error()), nil
+		}
 		return s.handleToolsCall(ctx, req)
 	case "resources/list":
+		if err := s.validateOperationalRequest(req); err != nil {
+			return NewErrorResponse(req.ID, UnsupportedProtocolVersionCode, "Invalid MCP request metadata", err.Error()), nil
+		}
 		return s.handleResourcesList(req)
 	case "resources/read":
+		if err := s.validateOperationalRequest(req); err != nil {
+			return NewErrorResponse(req.ID, UnsupportedProtocolVersionCode, "Invalid MCP request metadata", err.Error()), nil
+		}
 		return s.handleResourcesRead(req)
 	case "ping":
+		if err := s.validateOperationalRequest(req); err != nil {
+			return NewErrorResponse(req.ID, UnsupportedProtocolVersionCode, "Invalid MCP request metadata", err.Error()), nil
+		}
 		return NewResponse(req.ID, struct{}{}), nil
 	default:
 		return NewErrorResponse(req.ID, MethodNotFound, "Method not found", req.Method), nil
 	}
 }
 
+func (s *StdioServer) validateOperationalRequest(req *Request) error {
+	if s.initialized {
+		return nil
+	}
+	return validateStatelessMetadata(req)
+}
+
 func (s *StdioServer) handleInitialize(req *Request) (*Response, error) {
+	var params InitializeParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, InvalidParams, "Invalid params", err.Error()), nil
+	}
+	if params.ProtocolVersion == ProtocolVersion {
+		return NewErrorResponse(req.ID, MethodNotFound, "Method not found", req.Method), nil
+	}
+	if !version.IsMCPProtocolVersionSupported(params.ProtocolVersion) {
+		return NewErrorResponse(req.ID, InvalidRequest, "Unsupported protocol version",
+			fmt.Sprintf("supported versions: %s; got %s", strings.Join(version.SupportedMCPProtocolVersions, ", "), params.ProtocolVersion)), nil
+	}
+
 	caps := ServerCapabilities{
 		Tools: &ToolsCapability{
 			ListChanged: false,
@@ -172,13 +220,14 @@ func (s *StdioServer) handleInitialize(req *Request) (*Response, error) {
 	}
 
 	result := &InitializeResult{
-		ProtocolVersion: ProtocolVersion,
+		ProtocolVersion: params.ProtocolVersion,
 		Capabilities:    caps,
 		ServerInfo: ServerInfo{
 			Name:    ServerName,
 			Version: ServerVersion,
 		},
 	}
+	s.initialized = true
 	return NewResponse(req.ID, result), nil
 }
 
@@ -226,14 +275,21 @@ func (s *StdioServer) handleToolsList(req *Request) (*Response, error) {
 			Name:        t.Name,
 			Description: t.Description,
 			InputSchema: InputSchema{
-				Type:       "object",
-				Properties: props,
-				Required:   []string{},
+				Schema:                "https://json-schema.org/draft/2020-12/schema",
+				Type:                  "object",
+				Properties:            props,
+				Required:              []string{},
+				UnevaluatedProperties: boolPointer(false),
+				Extra:                 t.InputSchema,
 			},
 			Meta: BuildToolMeta(t),
 		})
 	}
-	return NewResponse(req.ID, &ListToolsResult{Tools: tools}), nil
+	return NewResponse(req.ID, &ListToolsResult{Tools: tools, TTLMS: 0, CacheScope: "private"}), nil
+}
+
+func boolPointer(value bool) *bool {
+	return &value
 }
 
 func (s *StdioServer) handleToolsCall(ctx context.Context, req *Request) (*Response, error) {
@@ -356,7 +412,7 @@ func (s *StdioServer) handleResourcesList(req *Request) (*Response, error) {
 		}
 	}
 
-	return NewResponse(req.ID, &ListResourcesResult{Resources: resources}), nil
+	return NewResponse(req.ID, &ListResourcesResult{Resources: resources, TTLMS: 0, CacheScope: "private"}), nil
 }
 
 func (s *StdioServer) handleResourcesRead(req *Request) (*Response, error) {
@@ -413,6 +469,8 @@ func (s *StdioServer) handleResourcesRead(req *Request) (*Response, error) {
 				Text:     htmlContent,
 			},
 		},
+		TTLMS:      0,
+		CacheScope: "private",
 	}), nil
 }
 

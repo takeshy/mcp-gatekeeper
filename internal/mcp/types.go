@@ -14,6 +14,18 @@ type Request struct {
 	Params  json.RawMessage `json:"params,omitempty"`
 }
 
+// StatelessRequestMeta contains the per-request context required by MCP 2026-07-28.
+type StatelessRequestMeta struct {
+	ProtocolVersion    string                 `json:"io.modelcontextprotocol/protocolVersion"`
+	ClientInfo         *ClientInfo            `json:"io.modelcontextprotocol/clientInfo"`
+	ClientCapabilities map[string]interface{} `json:"io.modelcontextprotocol/clientCapabilities"`
+}
+
+// RequestParamsMeta extracts the common _meta object from request parameters.
+type RequestParamsMeta struct {
+	Meta *StatelessRequestMeta `json:"_meta"`
+}
+
 // Response represents a JSON-RPC 2.0 response
 type Response struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -63,6 +75,7 @@ type InitializeParams struct {
 
 // ClientCapabilities represents client capabilities
 type ClientCapabilities struct {
+	// Roots and Sampling are retained only for clients negotiating a pre-2026 protocol.
 	Roots      *RootsCapability                  `json:"roots,omitempty"`
 	Sampling   *SamplingCapability               `json:"sampling,omitempty"`
 	Extensions map[string]map[string]interface{} `json:"extensions,omitempty"`
@@ -87,6 +100,14 @@ type InitializeResult struct {
 	ProtocolVersion string             `json:"protocolVersion"`
 	Capabilities    ServerCapabilities `json:"capabilities"`
 	ServerInfo      ServerInfo         `json:"serverInfo"`
+}
+
+// DiscoverResult advertises the versions and capabilities supported by a stateless server.
+type DiscoverResult struct {
+	ResultType        string             `json:"resultType"`
+	SupportedVersions []string           `json:"supportedVersions"`
+	Capabilities      ServerCapabilities `json:"capabilities"`
+	ServerInfo        ServerInfo         `json:"serverInfo"`
 }
 
 // ServerCapabilities represents server capabilities
@@ -123,9 +144,29 @@ type Tool struct {
 
 // InputSchema represents the JSON schema for tool input
 type InputSchema struct {
-	Type       string              `json:"type"`
-	Properties map[string]Property `json:"properties,omitempty"`
-	Required   []string            `json:"required,omitempty"`
+	Schema                string                 `json:"$schema,omitempty"`
+	Type                  string                 `json:"type"`
+	Properties            map[string]Property    `json:"properties,omitempty"`
+	Required              []string               `json:"required,omitempty"`
+	UnevaluatedProperties *bool                  `json:"unevaluatedProperties,omitempty"`
+	Extra                 map[string]interface{} `json:"-"`
+}
+
+// MarshalJSON merges arbitrary JSON Schema 2020-12 keywords into the generated schema.
+func (s InputSchema) MarshalJSON() ([]byte, error) {
+	type schemaAlias InputSchema
+	base, err := json.Marshal(schemaAlias(s))
+	if err != nil {
+		return nil, err
+	}
+	var merged map[string]interface{}
+	if err := json.Unmarshal(base, &merged); err != nil {
+		return nil, err
+	}
+	for key, value := range s.Extra {
+		merged[key] = value
+	}
+	return json.Marshal(merged)
 }
 
 // Property represents a property in JSON schema
@@ -143,7 +184,9 @@ type Items struct {
 
 // ListToolsResult represents the result of tools/list request
 type ListToolsResult struct {
-	Tools []Tool `json:"tools"`
+	Tools      []Tool `json:"tools"`
+	TTLMS      int64  `json:"ttlMs"`
+	CacheScope string `json:"cacheScope"`
 }
 
 // CallToolParams represents params for tools/call request
@@ -218,7 +261,9 @@ type Resource struct {
 
 // ListResourcesResult represents the result of resources/list request
 type ListResourcesResult struct {
-	Resources []Resource `json:"resources"`
+	Resources  []Resource `json:"resources"`
+	TTLMS      int64      `json:"ttlMs"`
+	CacheScope string     `json:"cacheScope"`
 }
 
 // ReadResourceParams represents params for resources/read request
@@ -236,5 +281,7 @@ type ResourceContent struct {
 
 // ReadResourceResult represents the result of resources/read request
 type ReadResourceResult struct {
-	Contents []ResourceContent `json:"contents"`
+	Contents   []ResourceContent `json:"contents"`
+	TTLMS      int64             `json:"ttlMs"`
+	CacheScope string            `json:"cacheScope"`
 }

@@ -287,7 +287,7 @@ func TestInitializeHandler(t *testing.T) {
 	}
 	defer server.Close()
 
-	body := bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	body := bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}`)
 	req := httptest.NewRequest(http.MethodPost, "/mcp", body)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -320,6 +320,50 @@ func TestInitializeHandler(t *testing.T) {
 	}
 	if result["serverInfo"] == nil {
 		t.Error("expected serverInfo in result")
+	}
+}
+
+func TestStatelessBridgeInitializesUpstreamAndPreservesID(t *testing.T) {
+	config := &ServerConfig{
+		Command: "sh",
+		Args: []string{"-c", `IFS= read -r initialize
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"upstream","version":"1"}}}'
+IFS= read -r initialized
+IFS= read -r request
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}'
+IFS= read -r wait_for_close`},
+		EnableStreamable: true,
+		Timeout:          2 * time.Second,
+	}
+	server, err := NewServer(config)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+
+	body := bytes.NewBufferString(`{"jsonrpc":"2.0","id":"client-42","method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"test","version":"1.0"},"io.modelcontextprotocol/clientCapabilities":{}}}}`)
+	req := httptest.NewRequest(http.MethodPost, "/mcp", body)
+	req.Header.Set(HeaderMCPProtocolVersion, StreamableProtocolVersion)
+	req.Header.Set(HeaderMCPMethod, "tools/list")
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp Response
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if string(resp.ID) != `"client-42"` {
+		t.Fatalf("expected client request ID, got %s", resp.ID)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if result["ttlMs"] != float64(0) || result["cacheScope"] != "private" {
+		t.Fatalf("expected stateless caching hints, got %#v", result)
 	}
 }
 
@@ -375,7 +419,7 @@ func TestWWWAuthenticateHeaderWhenOAuthEnabled(t *testing.T) {
 	}
 }
 
-func TestInitializeIncludesOAuthExtensionWhenOAuthEnabled(t *testing.T) {
+func TestInitializeDoesNotAdvertiseClientCredentialsWhenOAuthEnabled(t *testing.T) {
 	config := &ServerConfig{
 		Command:     "echo",
 		APIKey:      "test-key",
@@ -389,7 +433,7 @@ func TestInitializeIncludesOAuthExtensionWhenOAuthEnabled(t *testing.T) {
 	}
 	defer server.Close()
 
-	body := bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	body := bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}`)
 	req := httptest.NewRequest(http.MethodPost, "http://example.com/mcp", body)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer test-key")
@@ -415,11 +459,7 @@ func TestInitializeIncludesOAuthExtensionWhenOAuthEnabled(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected capabilities object, got %T", result["capabilities"])
 	}
-	extensions, ok := capabilities["extensions"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("expected extensions object, got %T", capabilities["extensions"])
-	}
-	if _, ok := extensions["io.modelcontextprotocol/oauth-client-credentials"]; !ok {
-		t.Fatalf("expected oauth client credentials extension, got %v", extensions)
+	if _, ok := capabilities["extensions"]; ok {
+		t.Fatalf("client credentials extension must not be advertised: %v", capabilities)
 	}
 }

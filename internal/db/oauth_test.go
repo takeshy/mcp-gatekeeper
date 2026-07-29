@@ -21,13 +21,14 @@ func TestOAuthClientCRUD(t *testing.T) {
 	}
 	defer db.Close()
 
-	// Test CreateOAuthClient
-	clientSecret, err := db.CreateOAuthClient("test-client")
+	// Test RegisterOAuthPublicClient
+	err = db.RegisterOAuthPublicClient(
+		"test-client",
+		[]string{"https://client.example/callback"},
+		[]string{"mcp"},
+	)
 	if err != nil {
-		t.Fatalf("CreateOAuthClient failed: %v", err)
-	}
-	if clientSecret == "" {
-		t.Fatal("Expected non-empty client secret")
+		t.Fatalf("RegisterOAuthPublicClient failed: %v", err)
 	}
 
 	// Test GetOAuthClient
@@ -44,23 +45,11 @@ func TestOAuthClientCRUD(t *testing.T) {
 	if client.Status != "active" {
 		t.Errorf("Expected status 'active', got '%s'", client.Status)
 	}
-
-	// Test ValidateClientCredentials with correct secret
-	validated, err := db.ValidateClientCredentials("test-client", clientSecret)
-	if err != nil {
-		t.Fatalf("ValidateClientCredentials failed: %v", err)
+	if len(client.RedirectURIs) != 1 || client.RedirectURIs[0] != "https://client.example/callback" {
+		t.Fatalf("Unexpected redirect URIs: %v", client.RedirectURIs)
 	}
-	if validated == nil {
-		t.Fatal("Expected credentials to be valid")
-	}
-
-	// Test ValidateClientCredentials with wrong secret
-	validated, err = db.ValidateClientCredentials("test-client", "wrong-secret")
-	if err != nil {
-		t.Fatalf("ValidateClientCredentials failed: %v", err)
-	}
-	if validated != nil {
-		t.Fatal("Expected invalid credentials")
+	if len(client.Scopes) != 1 || client.Scopes[0] != "mcp" {
+		t.Fatalf("Unexpected scopes: %v", client.Scopes)
 	}
 
 	// Test ListOAuthClients
@@ -84,15 +73,6 @@ func TestOAuthClientCRUD(t *testing.T) {
 	}
 	if client.Status != "revoked" {
 		t.Errorf("Expected status 'revoked', got '%s'", client.Status)
-	}
-
-	// Test that revoked client cannot authenticate
-	validated, err = db.ValidateClientCredentials("test-client", clientSecret)
-	if err != nil {
-		t.Fatalf("ValidateClientCredentials failed: %v", err)
-	}
-	if validated != nil {
-		t.Fatal("Expected revoked client to fail validation")
 	}
 
 	// Test DeleteOAuthClient
@@ -126,7 +106,11 @@ func TestOAuthTokenFlow(t *testing.T) {
 	defer db.Close()
 
 	// Create client
-	_, err = db.CreateOAuthClient("token-test-client")
+	err = db.RegisterOAuthPublicClient(
+		"token-test-client",
+		[]string{"https://client.example/callback"},
+		[]string{"mcp"},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +200,11 @@ func TestOAuthCleanup(t *testing.T) {
 	defer db.Close()
 
 	// Create client
-	_, err = db.CreateOAuthClient("cleanup-test-client")
+	err = db.RegisterOAuthPublicClient(
+		"cleanup-test-client",
+		[]string{"https://client.example/callback"},
+		[]string{"mcp"},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,5 +228,34 @@ func TestOAuthCleanup(t *testing.T) {
 
 	if AccessTokenExpiration != 1*time.Hour {
 		t.Errorf("Expected AccessTokenExpiration to be 1 hour, got %v", AccessTokenExpiration)
+	}
+}
+
+func TestOAuthCleanupPreservesRefreshTokenAfterAccessExpiry(t *testing.T) {
+	database, err := Open(t.TempDir() + "/oauth-cleanup.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	if err := database.RegisterOAuthPublicClient("refresh-client", []string{"https://client.example/callback"}, []string{"mcp"}); err != nil {
+		t.Fatal(err)
+	}
+	client, err := database.GetOAuthClient("refresh-client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, refreshToken, err := database.CreateToken(client.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.Exec(`UPDATE oauth_tokens SET expires_at = ? WHERE oauth_client_id = ?`, time.Now().Add(-time.Minute), client.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CleanupExpiredTokens(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := database.RefreshToken(refreshToken, client.ID); err != nil {
+		t.Fatalf("refresh token was removed with its expired access token: %v", err)
 	}
 }

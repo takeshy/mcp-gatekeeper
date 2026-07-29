@@ -16,9 +16,10 @@ type SSEEvent struct {
 
 // Session represents an MCP session
 type Session struct {
-	ID           string
-	CreatedAt    time.Time
-	LastActivity time.Time
+	ID              string
+	ProtocolVersion string
+	CreatedAt       time.Time
+	LastActivity    time.Time
 	mu           sync.Mutex
 	sseChans     []chan *SSEEvent
 	closed       bool
