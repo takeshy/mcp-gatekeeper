@@ -2,6 +2,7 @@
 mcp-gatekeeper
 mcp-gatekeeper-server
 mcp-gatekeeper-admin
+plugins/
 *.exe
 
 # Release artifacts
