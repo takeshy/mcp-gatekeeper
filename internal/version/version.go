@@ -20,6 +20,7 @@ var SupportedMCPProtocolVersions = []string{
 	MCPProtocolVersion,
 	MCPLegacyStreamableProtocolVersion,
 	"2025-06-18",
+	"2025-03-26",
 	"2024-11-05",
 }
 

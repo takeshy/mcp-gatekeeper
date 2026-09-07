@@ -10,6 +10,7 @@ func TestIsMCPProtocolVersionSupported(t *testing.T) {
 		{version: "2026-07-28", want: true},
 		{version: "2025-11-25", want: true},
 		{version: "2025-06-18", want: true},
+		{version: "2025-03-26", want: true},
 		{version: "2024-11-05", want: true},
 		{version: "2026-01-01", want: false},
 		{version: "", want: false},

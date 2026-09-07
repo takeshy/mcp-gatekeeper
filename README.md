@@ -455,7 +455,7 @@ go install github.com/takeshy/mcp-gatekeeper/cmd/admin@latest
 ## MCP Streamable HTTP
 
 MCP Gatekeeper supports the stateless MCP HTTP transport (protocol version 2026-07-28), while retaining the session-based Streamable HTTP transport for legacy clients.
-Clients using protocol versions `2025-06-18` and `2024-11-05` remain supported; the server echoes the version selected during initialization.
+Clients using protocol versions `2025-11-25`, `2025-06-18`, `2025-03-26`, and `2024-11-05` remain supported; the server echoes the version selected during initialization.
 
 In `2026-07-28` mode, initialization, sessions, Roots, Sampling, and protocol Logging are not advertised or handled. Use deployment-level telemetry such as OpenTelemetry or your platform's logging service. The legacy implementations remain isolated to requests using an older protocol version.
 
@@ -480,7 +480,7 @@ In `2026-07-28` mode, initialization, sessions, Roots, Sampling, and protocol Lo
 
 ### Endpoints
 
-For MCP `2026-07-28`, only stateless `POST /mcp` is used. `initialize`, `Mcp-Session-Id`, the SSE `GET`, and session `DELETE` are not part of this protocol version. Legacy clients negotiating `2025-11-25`, `2025-06-18`, or `2024-11-05` continue to use the stateful POST/GET/DELETE flow.
+For MCP `2026-07-28`, only stateless `POST /mcp` is used. `initialize`, `Mcp-Session-Id`, the SSE `GET`, and session `DELETE` are not part of this protocol version. Legacy clients negotiating `2025-11-25`, `2025-06-18`, `2025-03-26`, or `2024-11-05` continue to use the stateful POST/GET/DELETE flow.
 
 ### Stateless protocol flow (2026-07-28)
 
